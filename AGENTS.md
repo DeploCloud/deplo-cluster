@@ -24,6 +24,9 @@ for the rules, `../deplo/CONTEXT.md` for the vocabulary (use those words) and
 
 - `main.go` - mode (`relay` or none), `--version`, signal handling.
 - `internal/cluster/` - role, version (stamped by the build) and epoch.
+- `internal/wire/` - the relay's names, stream headers and mutual TLS rules (a contract with `deplo-agent`).
+- `internal/relay/` - the relay: the door, the roster pushed on its local socket, per-address rate limit.
+- `internal/party/` - a party's side (leader or member): dials out to every relay, never listens.
 
 ## Commands
 
