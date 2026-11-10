@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/DeploCloud/deplo-cluster/internal/cluster"
+	"github.com/DeploCloud/deplo-cluster/internal/leader"
 	"github.com/DeploCloud/deplo-cluster/internal/party"
 	"github.com/DeploCloud/deplo-cluster/internal/relay"
 	"github.com/DeploCloud/deplo-cluster/internal/wire"
@@ -49,7 +50,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	ca := fs.String("ca", envOr("DEPLO_CLUSTER_CA", ""), "the instance's agent CA (PEM)")
 	listen := fs.String("listen", envOr("DEPLO_RELAY_LISTEN", ""), "relay: comma-separated addresses to answer the proxy on (never a public one)")
 	socket := fs.String("socket", envOr("DEPLO_RELAY_SOCKET", ""), "relay: unix socket the roster is pushed on")
-	stateDir := fs.String("state", envOr("DEPLO_RELAY_STATE", ""), "relay: directory that keeps the roster across restarts")
+	stateDir := fs.String("state", envOr("DEPLO_RELAY_STATE", envOr("DEPLO_CLUSTER_STATE", "")), "directory that keeps state across restarts: the relay's roster, or the leader's epochs and events")
+	leaderSocket := fs.String("leader-socket", envOr("DEPLO_CLUSTER_SOCKET", ""), "leader: unix socket the agent forwards calls on")
 	relays := fs.String("relays-file", envOr("DEPLO_CLUSTER_RELAYS_FILE", ""), "leader: file listing the relays to dial, one address per line")
 	if err := fs.Parse(rest); err != nil {
 		return 2
@@ -68,19 +70,57 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	if *cert != "" && *relays != "" {
-		p := party.New(party.Config{
+	return runLeader(ctx, identity, *cert != "" && *relays != "", *relays, *leaderSocket, *stateDir, logger)
+}
+
+// runLeader answers the agent on its local socket and renews every member's lease through the relays.
+func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dial bool, relays, socket, stateDir string, logger *log.Logger) int {
+	var p *party.Party
+	if dial {
+		p = party.New(party.Config{
 			Role:     wire.RoleLeader,
 			Identity: identity,
-			Relays:   func() []string { return readLines(*relays) },
-			// Leading arrives in a later ticket: a stream is refused until there is something to say on it.
+			Relays:   func() []string { return readLines(relays) },
+			// Members never open a stream to the leader; only the leader sends orders.
 			Accept: func(_ wire.Party, c net.Conn) { c.Close() },
 			Logf:   logger.Printf,
 		})
 		go p.Run(ctx)
 	}
+	l := leader.New(leader.Config{
+		Dial: func(ctx context.Context, to wire.Party) (net.Conn, error) {
+			if p == nil {
+				return nil, errors.New("this leader has no certificate or relay to reach members with")
+			}
+			return p.Dial(ctx, to)
+		},
+		StateDir: stateDir,
+		Logf:     logger.Printf,
+	})
+	go l.Run(ctx)
+	if socket != "" {
+		stop, err := serveLocalSocket(l.Handler(), socket)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer stop()
+	}
 	<-ctx.Done()
 	return 0
+}
+
+// serveLocalSocket answers the agent that supervises this process on a unix socket: never a network address.
+func serveLocalSocket(h http.Handler, socket string) (func(), error) {
+	_ = os.Remove(socket)
+	sock, err := net.Listen("unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	_ = os.Chmod(socket, 0o600)
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	go srv.Serve(sock)
+	return func() { srv.Close() }, nil
 }
 
 func readLines(file string) []string {

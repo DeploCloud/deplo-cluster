@@ -133,6 +133,20 @@ func TestOnlyRunRelayListens(t *testing.T) {
 		if !ok || fn.Name.Name == "runRelay" {
 			continue
 		}
+		if fn.Name.Name == "serveLocalSocket" {
+			// The one other listener answers the local agent on a unix socket, never on the network.
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if c, ok := n.(*ast.CallExpr); ok {
+					if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Listen" {
+						if lit, ok := c.Args[0].(*ast.BasicLit); !ok || lit.Value != `"unix"` {
+							t.Errorf("%s: serveLocalSocket listens on something but a unix socket", fset.Position(c.Pos()))
+						}
+					}
+				}
+				return true
+			})
+			continue
+		}
 		ast.Inspect(fn, func(n ast.Node) bool {
 			if sel, ok := n.(*ast.SelectorExpr); ok && (strings.HasPrefix(sel.Sel.Name, "Listen") || strings.HasPrefix(sel.Sel.Name, "Serve")) {
 				t.Errorf("%s: %s listens outside runRelay", fset.Position(sel.Pos()), sel.Sel.Name)
