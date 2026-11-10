@@ -1,0 +1,83 @@
+# Build and publish the cluster binary on a version tag.
+#
+# The server agent installs this binary from these release assets and verifies
+# its sha256 against checksums.txt, so the asset NAMES and the checksums format
+# are a contract:
+#
+#   deplo-cluster-linux-amd64
+#   deplo-cluster-linux-arm64
+#   checksums.txt          (sha256sum format: "<hex>  <filename>" per line)
+#
+# DeploCloud/deplo pins a version (deplo.cluster in package.json) and refuses to
+# ship unless that release has a checksums.txt. Do not rename the assets.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release + upload assets
+      # Sigstore keyless signing: the OIDC token is the identity, so there is no
+      # key to store or rotate.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A red test means no release: nothing below runs.
+      - name: Run tests
+        run: go test ./...
+        env:
+          CGO_ENABLED: "0"
+
+      - name: Build static binaries (amd64, arm64)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Building deplo-cluster ${VERSION} for linux/amd64 and linux/arm64"
+          LDFLAGS="-s -w -X github.com/DeploCloud/deplo-cluster/internal/cluster.Version=${VERSION}"
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" \
+              go build -trimpath -ldflags "${LDFLAGS}" \
+              -o "dist/deplo-cluster-linux-${arch}" .
+          done
+
+      - name: Generate checksums.txt
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum deplo-cluster-linux-amd64 deplo-cluster-linux-arm64 > checksums.txt
+          cat checksums.txt
+
+      # The signature: proves this workflow built these exact binaries
+      # (`gh attestation verify`), without trusting the release page.
+      - name: Attest the binaries' provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/deplo-cluster-linux-*
+
+      - name: Publish release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          files: |
+            dist/deplo-cluster-linux-amd64
+            dist/deplo-cluster-linux-arm64
+            dist/checksums.txt
+          generate_release_notes: true
+          # A canary tag (v0.1.0-canary.1) is a pre-release, never `latest`.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
