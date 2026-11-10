@@ -18,14 +18,15 @@ const (
 
 // Workload is what is being placed.
 type Workload struct {
-	Kind        string   `json:"kind"`
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Environment string   `json:"environment"`
-	Image       string   `json:"image"`
-	Archs       []string `json:"archs"`
-	LimitMB     int      `json:"limitMb"`
-	PeakMB      int      `json:"peakMb"`
+	Kind        string `json:"kind"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Environment string `json:"environment"`
+	// Image and Archs left empty mean not built yet, or any: those steps pass.
+	Image   string   `json:"image"`
+	Archs   []string `json:"archs"`
+	LimitMB int      `json:"limitMb"`
+	PeakMB  int      `json:"peakMb"`
 }
 
 // Member is what the leader knows about one server of the cluster.
@@ -91,12 +92,12 @@ func Place(cluster string, w Workload, members []Member) Answer {
 		}
 	}
 	for _, m := range live {
-		if has(w.Archs, m.Arch) {
+		if len(w.Archs) == 0 || has(w.Archs, m.Arch) {
 			arch = append(arch, m)
 		}
 	}
 	for _, m := range arch {
-		if has(m.Images, w.Image) {
+		if w.Image == "" || has(m.Images, w.Image) {
 			image = append(image, m)
 		}
 	}

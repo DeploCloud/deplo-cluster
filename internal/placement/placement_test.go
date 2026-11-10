@@ -99,3 +99,13 @@ func TestThenMostFreeThenFewestWorkloads(t *testing.T) {
 		t.Fatalf("tie: %s", got)
 	}
 }
+
+func TestAnUnbuiltWorkloadSkipsTheImageAndArchitectureSteps(t *testing.T) {
+	w := web()
+	w.Image, w.Archs = "", nil
+	m := member("a", 1000, 0)
+	m.Images, m.Arch = nil, "riscv64"
+	if got := place(t, w, m).Member; got != "a" {
+		t.Fatalf("got %q", got)
+	}
+}
