@@ -45,6 +45,19 @@ func (l *Leader) Handler() http.Handler {
 	mux.HandleFunc("POST /call/leader.snapshot", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, l.Snapshot())
 	})
+	mux.HandleFunc("POST /call/placement.place", func(w http.ResponseWriter, r *http.Request) {
+		var req PlaceRequest
+		if !decode(w, r, &req) {
+			return
+		}
+		ans, err := l.Place(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		reply(w, ans)
+	})
+	l.bundleRoutes(mux)
 	mux.HandleFunc("GET /watch", l.watch)
 	return mux
 }

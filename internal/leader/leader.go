@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DeploCloud/deplo-cluster/internal/bundles"
 	"github.com/DeploCloud/deplo-cluster/internal/events"
 	"github.com/DeploCloud/deplo-cluster/internal/lease"
 	"github.com/DeploCloud/deplo-cluster/internal/wire"
@@ -35,12 +36,23 @@ type Config struct {
 	// StateDir keeps the epochs and the event buffer across restarts; empty keeps nothing.
 	StateDir string
 	Logf     func(format string, args ...any)
+	// Bundles holds the sealed failover bundles; nil serves none and fails nothing over.
+	Bundles *bundles.Store
+	// PathOK says whether this leader can still reach the relays. A leader that lost its own path moves nothing.
+	PathOK func() bool
 }
 
-// Member is a server of the cluster and the certificate it dials with.
+// Member is a server of the cluster and the certificate it dials with. The rest is what the control plane last
+// knew about it, which is all a failover has to go on while Deplo is away.
 type Member struct {
 	ID          string `json:"id"`
 	Fingerprint string `json:"fingerprint"`
+
+	Arch         string   `json:"arch,omitempty"`
+	FreeMB       int      `json:"freeMb,omitempty"`
+	Images       []string `json:"images,omitempty"`
+	Emptying     bool     `json:"emptying,omitempty"`
+	DatabaseEnvs []string `json:"databaseEnvs,omitempty"`
 }
 
 type member struct {
@@ -54,6 +66,17 @@ type cluster struct {
 	members    map[string]*member
 	placement  []lease.Entry
 	superseded bool
+	// moved marks a silent member whose workloads were already dealt with, until it answers again.
+	moved map[string]bool
+	// waiting is what found no room, retried every RetryEvery; auth is where the leader put a workload until
+	// the control plane's picture agrees, so a roster that has not seen the move yet cannot undo it.
+	waiting map[string]*Waiting
+	auth    map[string]authority
+}
+
+type authority struct {
+	At    time.Time   `json:"at"`
+	Entry lease.Entry `json:"entry"`
 }
 
 // Leader serves every cluster whose roster the control plane pushed.
@@ -63,6 +86,10 @@ type Leader struct {
 	mu       sync.Mutex
 	clusters map[string]*cluster
 	epochs   map[string]uint64
+	// foMu lets one failover pass run at a time; renewals never wait on it.
+	foMu sync.Mutex
+	// restored is the failover state read at start, handed to each cluster when its roster first arrives.
+	restored map[string]persisted
 }
 
 // New returns a leader; Run starts renewing.
@@ -83,6 +110,7 @@ func New(cfg Config) *Leader {
 		if raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "epochs.json")); err == nil {
 			_ = json.Unmarshal(raw, &l.epochs)
 		}
+		l.loadFailover()
 	}
 	return l
 }
@@ -125,19 +153,20 @@ func (l *Leader) SetRoster(r Roster) error {
 	}
 	c := l.clusters[r.Cluster]
 	if c == nil {
-		c = &cluster{members: map[string]*member{}}
+		c = l.newCluster(r.Cluster)
 		l.clusters[r.Cluster] = c
 	}
 	now := l.cfg.Now()
 	next := map[string]*member{}
 	for _, m := range r.Members {
 		if old := c.members[m.ID]; old != nil && old.Fingerprint == m.Fingerprint {
+			old.Member = m
 			next[m.ID] = old
 			continue
 		}
 		next[m.ID] = &member{Member: m, lastAck: now, state: lease.OK}
 	}
-	c.members, c.placement = next, r.Placement
+	c.members, c.placement = next, l.reconcilePlacement(c, r.Placement)
 	changed := r.Epoch != l.epochs[r.Cluster]
 	if r.Epoch > c.epoch {
 		c.superseded = false
@@ -178,11 +207,17 @@ func (l *Leader) Assign(a Assign) error {
 			kept = append(kept, e)
 		}
 	}
+	for i := range c.waiting {
+		if w := c.waiting[i]; w.Kind == a.Kind && w.ID == a.ID {
+			delete(c.waiting, i)
+		}
+	}
 	for i, m := range a.Members {
 		kept = append(kept, lease.Entry{Kind: a.Kind, ID: a.ID, Replica: i, Member: m, Slug: a.Slug, SingleWriter: a.SingleWriter})
 	}
 	c.placement = kept
 	epoch := c.epoch
+	l.saveFailover()
 	l.mu.Unlock()
 	l.log.Append("placement", a.Cluster, map[string]any{"kind": a.Kind, "workloadId": a.ID, "members": a.Members, "epoch": epoch})
 	return nil
@@ -290,6 +325,18 @@ func (l *Leader) settle() {
 
 // Run renews leases every lease.RenewEvery until ctx ends.
 func (l *Leader) Run(ctx context.Context) {
+	go func() {
+		f := time.NewTicker(lease.RenewEvery)
+		defer f.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-f.C:
+				l.Failover(ctx)
+			}
+		}
+	}()
 	t := time.NewTicker(lease.RenewEvery)
 	defer t.Stop()
 	for {
