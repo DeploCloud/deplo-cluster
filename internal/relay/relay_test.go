@@ -84,6 +84,20 @@ func (f *fixture) waitConnected(m *member, want int) {
 	f.t.Fatalf("party connected to %d relays, want %d", m.party.Connected(), want)
 }
 
+// waitRelayHolds waits until the relay itself has registered n connections: a party sees its link up
+// a moment before the relay has put it in its table, and a dial in that gap is refused "not connected".
+func (f *fixture) waitRelayHolds(n int) {
+	f.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.relay.Connected() == n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.t.Fatalf("the relay holds %d connections, want %d", f.relay.Connected(), n)
+}
+
 func exchange(t *testing.T, c net.Conn, line string) string {
 	t.Helper()
 	c.SetDeadline(time.Now().Add(5 * time.Second))
@@ -105,6 +119,7 @@ func TestStreamBetweenPartiesOfOneClusterIsMutualTLSEndToEnd(t *testing.T) {
 	f.relay.SetRoster("clu_1", []wire.Party{ma.wire, mb.wire})
 	f.waitConnected(ma, 1)
 	f.waitConnected(mb, 1)
+	f.waitRelayHolds(2)
 
 	c, err := ma.party.Dial(f.ctx, mb.wire)
 	if err != nil {
@@ -127,6 +142,7 @@ func TestStreamBetweenClustersIsRefused(t *testing.T) {
 	f.relay.SetRoster("clu_2", []wire.Party{mb.wire})
 	f.waitConnected(ma, 1)
 	f.waitConnected(mb, 1)
+	f.waitRelayHolds(2)
 
 	c, err := ma.party.Dial(f.ctx, mb.wire)
 	if err == nil {
@@ -154,6 +170,7 @@ func TestPartyOnTheSameServerKeepsItsRolesApart(t *testing.T) {
 	f.waitConnected(leader, 1)
 	f.waitConnected(memberOnHost, 1)
 	f.waitConnected(mo, 1)
+	f.waitRelayHolds(3)
 
 	if c, err := mo.party.Dial(f.ctx, leader.wire); err == nil {
 		c.Close()
@@ -173,6 +190,7 @@ func TestChangingTheRosterCutsTheOldIdentityOffAtOnce(t *testing.T) {
 	f.relay.SetRoster("clu_1", []wire.Party{ma.wire, mb.wire})
 	f.waitConnected(ma, 1)
 	f.waitConnected(mb, 1)
+	f.waitRelayHolds(2)
 	c, err := ma.party.Dial(f.ctx, mb.wire)
 	if err != nil {
 		t.Fatal(err)
@@ -212,6 +230,7 @@ func TestRemovingAPartyFromAClusterEndsItsStreamsButNotItsOtherCluster(t *testin
 	f.relay.SetRoster("clu_2", []wire.Party{mb.wire})
 	f.waitConnected(ma, 1)
 	f.waitConnected(mb, 1)
+	f.waitRelayHolds(2)
 	c, err := ma.party.Dial(f.ctx, mb.wire)
 	if err != nil {
 		t.Fatal(err)
