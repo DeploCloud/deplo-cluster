@@ -116,3 +116,34 @@ func TestABundleSealedToAnotherKeyOrNamingAnotherWorkloadIsRefused(t *testing.T)
 		t.Fatal("a path was accepted as a cluster name")
 	}
 }
+
+func TestTheIndexNamesTheBackupFromTheBundleItselfAndHoldsNoSecret(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	b := Bundle{V: 1, Kind: "database", Workload: "db_1", DeploymentID: "rev_1", Stack: Stack{Slug: "db-main", ComposeYAML: "services: {}"},
+		Restore: &Restore{RestoreRef: RestoreRef{BackupID: "brun_1", TakenAt: "2026-03-01T11:45:00Z", StoreMember: "srv_b"},
+			Request: json.RawMessage(`{"s3":{"secretKey":"s3cr3t"},"database":{"password":"pgpass"}}`)}}
+	// What the caller says about the restore is not believed: only the sealed bundle is.
+	claimed := Meta{Name: "main", Restore: &RestoreRef{BackupID: "brun_other"}}
+	if err := s.Put("clu_1", "database", "db_1", "rev_1", seal(t, s.PublicKey(), b), claimed); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.Meta("clu_1", "database", "db_1")
+	if err != nil || m.Restore == nil || m.Restore.BackupID != "brun_1" || m.Restore.StoreMember != "srv_b" || m.Restore.TakenAt != "2026-03-01T11:45:00Z" {
+		t.Fatalf("meta %+v %v", m.Restore, err)
+	}
+	idx, _ := os.ReadFile(filepath.Join(dir, "bundles", "clu_1", "database.db_1.json"))
+	if bytes.Contains(idx, []byte("s3cr3t")) || bytes.Contains(idx, []byte("pgpass")) {
+		t.Fatalf("the index holds a secret: %s", idx)
+	}
+	got, _ := s.Unseal("clu_1", "database", "db_1")
+	if got.Restore == nil || !bytes.Contains(got.Restore.Request, []byte("s3cr3t")) {
+		t.Fatalf("the opened bundle lost its restore request: %+v", got.Restore)
+	}
+	// A bundle that replaces it without a restore clears the index too.
+	b.Restore, b.DeploymentID = nil, "rev_2"
+	_ = s.Put("clu_1", "database", "db_1", "rev_2", seal(t, s.PublicKey(), b), claimed)
+	if m, _ := s.Meta("clu_1", "database", "db_1"); m.Restore != nil {
+		t.Fatalf("the index still names a backup: %+v", m.Restore)
+	}
+}

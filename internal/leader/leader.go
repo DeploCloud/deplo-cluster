@@ -55,6 +55,8 @@ type Member struct {
 	DatabaseEnvs []string `json:"databaseEnvs,omitempty"`
 	// NoFailover is a member whose agent cannot start a moved workload: it keeps what it runs and takes over nothing.
 	NoFailover bool `json:"noFailover,omitempty"`
+	// NoRestore is a member whose agent cannot restore a backup before a start: it is given no workload that needs one.
+	NoRestore bool `json:"noRestore,omitempty"`
 }
 
 type member struct {
@@ -74,6 +76,8 @@ type cluster struct {
 	// the control plane's picture agrees, so a roster that has not seen the move yet cannot undo it.
 	waiting map[string]*Waiting
 	auth    map[string]authority
+	// extended is, per member, when a lease this leader extended before a restart runs out at the latest.
+	extended map[string]time.Time
 	// roster is the last one pushed, kept so a restarted leader serves its cluster before Deplo is back.
 	roster Roster
 }
@@ -85,6 +89,9 @@ type authority struct {
 	From   string `json:"from,omitempty"`
 	Reason string `json:"reason,omitempty"`
 	Seq    uint64 `json:"seq,omitempty"`
+	// BackupID and BackupAt name the backup a moved workload was restored from.
+	BackupID string `json:"backupId,omitempty"`
+	BackupAt string `json:"backupAt,omitempty"`
 }
 
 // Leader serves every cluster whose roster the control plane pushed.
@@ -295,6 +302,11 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	if r.OK {
 		l.mu.Lock()
 		m.lastAck = l.cfg.Now()
+		// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
+		if cl := l.clusters[clusterID]; cl != nil && o.ExtendSeconds == 0 && !cl.extended[m.ID].IsZero() {
+			delete(cl.extended, m.ID)
+			l.saveFailover()
+		}
 		l.mu.Unlock()
 	}
 }
@@ -382,6 +394,9 @@ type Move struct {
 	From   string `json:"from"`
 	Reason string `json:"reason"`
 	Seq    uint64 `json:"seq"`
+	// BackupID and BackupAt name the backup the workload was restored from, when it was.
+	BackupID string `json:"backupId,omitempty"`
+	BackupAt string `json:"backupAt,omitempty"`
 }
 
 // Snapshot is the whole truth now, for the control plane to reconcile against after a replay.
@@ -403,7 +418,7 @@ func (l *Leader) Snapshot() Snapshot {
 		sort.Slice(v.Members, func(i, j int) bool { return v.Members[i].ID < v.Members[j].ID })
 		v.Moves = []Move{}
 		for _, a := range c.auth {
-			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq})
+			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq, BackupID: a.BackupID, BackupAt: a.BackupAt})
 		}
 		sort.Slice(v.Moves, func(i, j int) bool {
 			a, b := v.Moves[i], v.Moves[j]

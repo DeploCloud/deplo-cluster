@@ -39,13 +39,21 @@ type members struct {
 	// starts are the start orders each member was given; refuse makes a member fail them.
 	starts map[string][]lease.Order
 	refuse map[string]bool
+	// unrestored makes a member bring a workload up without restoring its backup, as an older agent would.
+	unrestored map[string]bool
+	// startLeft is how long the leader gave each member's last start order.
+	startLeft map[string]time.Duration
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, startLeft: map[string]time.Duration{}}
 }
 
-func (m *members) dial(_ context.Context, to wire.Party) (net.Conn, error) {
+func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
+	var left time.Duration
+	if d, ok := ctx.Deadline(); ok {
+		left = time.Until(d)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cut[to.Fingerprint] {
@@ -70,7 +78,9 @@ func (m *members) dial(_ context.Context, to wire.Party) (net.Conn, error) {
 			m.orders[to.Fingerprint] = append(m.orders[to.Fingerprint], o)
 			if o.Start != nil {
 				m.starts[to.Fingerprint] = append(m.starts[to.Fingerprint], o)
+				m.startLeft[to.Fingerprint] = left
 				r.Started = !m.refuse[to.Fingerprint]
+				r.Restored = r.Started && o.Start.Restore != nil && !m.unrestored[to.Fingerprint]
 				if !r.Started {
 					r = lease.Reply{Error: "no room on this disk"}
 				}

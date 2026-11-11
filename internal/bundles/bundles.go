@@ -28,6 +28,23 @@ type Meta struct {
 	PeakMB      int      `json:"peakMb"`
 	HasDomain   bool     `json:"hasDomain"`
 	CreatedAt   string   `json:"createdAt"`
+	// Restore names the backup the bundle restores from. Put reads it from the bundle itself, never from the caller.
+	Restore *RestoreRef `json:"restore,omitempty"`
+}
+
+// RestoreRef is the part of a bundle's restore that is no secret: which backup, and who can read it.
+type RestoreRef struct {
+	BackupID string `json:"backupId"`
+	TakenAt  string `json:"takenAt"`
+	// StoreMember is the member whose disk holds the backup; empty is a bucket every member reaches.
+	StoreMember string `json:"storeMember,omitempty"`
+}
+
+// Restore is the backup a member restores before a moved workload counts as started.
+type Restore struct {
+	RestoreRef
+	// Request is the agent's own restore request as JSON, credentials included; the leader passes it on unread.
+	Request json.RawMessage `json:"request"`
 }
 
 // RegistryAuth is a registry login a pulled image needs again.
@@ -69,6 +86,8 @@ type Bundle struct {
 	Workload     string `json:"workload"`
 	DeploymentID string `json:"deploymentId"`
 	Stack        Stack  `json:"stack"`
+	// Restore is set for a workload that keeps data: without it the workload waits for its member.
+	Restore *Restore `json:"restore,omitempty"`
 }
 
 // Held is one stored bundle as the list shows it.
@@ -175,6 +194,11 @@ func (s *Store) Put(cluster, kind, id, deploymentID string, sealed []byte, meta 
 	}
 	if b.Kind != kind || b.Workload != id || b.DeploymentID != deploymentID {
 		return errors.New("the bundle names another workload or deployment than the call")
+	}
+	meta.Restore = nil
+	if b.Restore != nil {
+		ref := b.Restore.RestoreRef
+		meta.Restore = &ref
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

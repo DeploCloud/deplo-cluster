@@ -42,13 +42,17 @@ type Waiting struct {
 func entryKey(kind, id string, replica int) string { return fmt.Sprintf("%s/%s/%d", kind, id, replica) }
 
 type persisted struct {
-	Waiting map[string]*Waiting  `json:"waiting"`
-	Auth    map[string]authority `json:"auth"`
+	Waiting  map[string]*Waiting  `json:"waiting"`
+	Auth     map[string]authority `json:"auth"`
+	Extended map[string]time.Time `json:"extended,omitempty"`
 }
 
 func (l *Leader) newCluster(id string) *cluster {
-	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}}
+	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}}
 	if p, ok := l.restored[id]; ok {
+		if p.Extended != nil {
+			c.extended = p.Extended
+		}
 		if p.Waiting != nil {
 			c.waiting = p.Waiting
 		}
@@ -77,7 +81,7 @@ func (l *Leader) saveFailover() {
 		out[id] = p
 	}
 	for id, c := range l.clusters {
-		out[id] = persisted{Waiting: c.waiting, Auth: c.auth}
+		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended}
 	}
 	raw, _ := json.Marshal(out)
 	tmp := filepath.Join(l.cfg.StateDir, "failover.json.tmp")
@@ -249,21 +253,30 @@ func (l *Leader) startOrder(b bundles.Bundle) *lease.Start {
 	for _, m := range s.Mounts {
 		mounts = append(mounts, lease.MountFile(m))
 	}
-	return &lease.Start{DeploymentID: b.DeploymentID, Slug: s.Slug, ProjectID: s.ProjectID, ImageRef: s.ImageRef, ComposeYAML: s.ComposeYAML,
+	st := &lease.Start{DeploymentID: b.DeploymentID, Slug: s.Slug, ProjectID: s.ProjectID, ImageRef: s.ImageRef, ComposeYAML: s.ComposeYAML,
 		Network: s.Network, Env: s.Env, RegistryAuth: auth, ComposeUpArgs: s.ComposeUpArgs, Ready: s.Ready, RestartRule: s.RestartRule,
 		StartAfterReady: s.StartAfterReady, Mounts: mounts, FilesBindSources: s.FilesBindSources}
+	if r := b.Restore; r != nil {
+		st.Restore = &lease.Restore{BackupID: r.BackupID, TakenAt: r.TakenAt, Request: r.Request}
+	}
+	return st
 }
 
 // sendStart gives one member the order to bring a workload up and waits for it to answer.
 func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error {
-	ctx, cancel := context.WithTimeout(ctx, lease.StartTimeout)
+	// ponytail: one start at a time, so a long restore holds the Apps behind it; run restores beside them if that hurts.
+	limit := lease.StartTimeout
+	if o.Start.Restore != nil {
+		limit = lease.RestoreTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: fp, Role: wire.RoleMember})
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(lease.StartTimeout))
+	_ = c.SetDeadline(time.Now().Add(limit))
 	r, err := lease.Send(c, o)
 	switch {
 	case err != nil:
@@ -273,6 +286,8 @@ func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error 
 			return errors.New(r.Error)
 		}
 		return errors.New("the member did not bring it up")
+	case o.Start.Restore != nil && !r.Restored:
+		return errors.New("the member brought it up without restoring its backup")
 	}
 	return nil
 }
@@ -304,9 +319,14 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 				entry = e
 			}
 		}
+		// What keeps data never starts empty: without a backup to restore it waits for its member.
+		if entry.SingleWriter && b.Restore == nil {
+			l.mu.Unlock()
+			return outcome{skipped: true}
+		}
 		var facts []placement.Member
 		for _, f := range c.memberFacts(l.cfg.Now()) {
-			if f.ID != from && !exclude[f.ID] && !c.members[f.ID].NoFailover {
+			if f.ID != from && !exclude[f.ID] && !c.members[f.ID].NoFailover && canRestore(b.Restore, c.members[f.ID]) {
 				facts = append(facts, f)
 			}
 		}
@@ -341,14 +361,19 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		entry.Kind, entry.ID, entry.Replica = kind, id, replica
 		entry.Member = ans.Member
-		l.commit(clusterID, entry, placement.Needed(w), from)
+		l.commit(clusterID, entry, placement.Needed(w), from, b.Restore)
 		return outcome{member: ans.Member}
 	}
 	return outcome{refusal: &placement.Refusal{Reason: "start_failed", NeededMB: placement.Needed(placement.Workload{LimitMB: meta.LimitMB, PeakMB: meta.PeakMB}), Cluster: clusterID, Workload: id}}
 }
 
+// canRestore says whether a member can restore r: its agent knows how, and a backup on a member's disk is read there only.
+func canRestore(r *bundles.Restore, m *member) bool {
+	return r == nil || (!m.NoRestore && (r.StoreMember == "" || r.StoreMember == m.ID))
+}
+
 // commit records where a workload now runs, takes its memory off that member and tells the control plane.
-func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string) {
+func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string, restored *bundles.Restore) {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil {
@@ -369,14 +394,20 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 		m.FreeMB -= needMB
 	}
 	key := entryKey(e.Kind, e.ID, e.Replica)
-	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, From: from, Reason: StoppedAnswering}
+	a := authority{At: l.cfg.Now(), Entry: e, From: from, Reason: StoppedAnswering}
+	moved := map[string]any{"kind": e.Kind, "workloadId": e.ID, "from": from, "to": e.Member, "reason": StoppedAnswering}
+	if restored != nil {
+		a.BackupID, a.BackupAt = restored.BackupID, restored.TakenAt
+		moved["backupId"], moved["backupAt"] = restored.BackupID, restored.TakenAt
+	}
+	c.auth[key] = a
 	delete(c.waiting, key)
 	members := replicaMembers(c.placement, e.Kind, e.ID)
 	epoch := c.epoch
 	l.saveFailover()
 	l.mu.Unlock()
 	l.log.Append("placement", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "members": members, "epoch": epoch})
-	ev := l.log.Append("failed_over", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "from": from, "to": e.Member, "reason": StoppedAnswering})
+	ev := l.log.Append("failed_over", clusterID, moved)
 	l.stamp(clusterID, key, ev.Seq)
 }
 
@@ -483,13 +514,14 @@ func (l *Leader) Failover(ctx context.Context) {
 		}
 		sort.Strings(mids)
 		for _, mid := range mids {
-			if now.Sub(c.members[mid].lastAck) < FailoverAfter || c.moved[mid] {
+			// A lease extended before a restart may still be alive on a member this leader has not heard since.
+			if now.Sub(c.members[mid].lastAck) < FailoverAfter || c.moved[mid] || now.Before(c.extended[mid].Add(FailoverAfter-lease.FenceAfter)) {
 				continue
 			}
 			var es []lease.Entry
 			for _, e := range c.placement {
-				// A single-writer workload waits for its member: two writers are worse than a wait.
-				if e.Member == mid && !e.SingleWriter {
+				// A single-writer workload moves only onto a backup another member can read; else it waits for its member.
+				if e.Member == mid && (!e.SingleWriter || l.restorable(id, e, mid)) {
 					es = append(es, e)
 				}
 			}
@@ -515,6 +547,12 @@ func (l *Leader) Failover(ctx context.Context) {
 	for _, r := range retries {
 		l.retry(ctx, r)
 	}
+}
+
+// restorable says whether the workload's bundle names a backup that did not go down with its member.
+func (l *Leader) restorable(clusterID string, e lease.Entry, member string) bool {
+	m, err := l.cfg.Bundles.Meta(clusterID, e.Kind, e.ID)
+	return err == nil && m.Restore != nil && m.Restore.StoreMember != member
 }
 
 func (l *Leader) runJob(ctx context.Context, j failoverJob) {
@@ -583,14 +621,18 @@ func (l *Leader) Drain(ctx context.Context) {
 	}
 	var jobs []job
 	l.mu.Lock()
+	// Kept before the order leaves: a member that took it and whose answer was lost is extended all the same.
+	until := l.cfg.Now().Add(lease.FenceAfter + lease.ExtendFor)
 	for id, c := range l.clusters {
 		if c.superseded {
 			continue
 		}
 		for _, m := range c.members {
+			c.extended[m.ID] = until
 			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: append([]lease.Entry(nil), c.placement...), ExtendSeconds: int(lease.ExtendFor / time.Second)}})
 		}
 	}
+	l.saveFailover()
 	l.mu.Unlock()
 	done := make(chan struct{}, len(jobs))
 	for _, j := range jobs {

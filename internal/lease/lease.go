@@ -20,6 +20,8 @@ const (
 	MaxLine = 16 << 20
 	// StartTimeout is how long a member may take to bring a moved workload up.
 	StartTimeout = 5 * time.Minute
+	// RestoreTimeout is how long a start that restores a backup first may take.
+	RestoreTimeout = StartTimeout + 30*time.Minute
 	// ExtendFor is how long a planned restart of the leader buys every member.
 	ExtendFor = 5 * time.Minute
 )
@@ -96,6 +98,15 @@ type Start struct {
 	StartAfterReady  []string    `json:"startAfterReady,omitempty"`
 	Mounts           []MountFile `json:"mounts,omitempty"`
 	FilesBindSources []string    `json:"filesBindSources,omitempty"`
+	// Restore is the backup the member restores before the workload counts as started.
+	Restore *Restore `json:"restore,omitempty"`
+}
+
+// Restore names one backup and carries the member's own restore request as JSON, passed on unread.
+type Restore struct {
+	BackupID string          `json:"backupId"`
+	TakenAt  string          `json:"takenAt"`
+	Request  json.RawMessage `json:"request"`
 }
 
 // MountFile is a file the deploy writes beside the stack.
@@ -110,10 +121,12 @@ const StaleEpoch = "stale_epoch"
 // Reply is a member's answer; on StaleEpoch, Epoch is the one it holds.
 type Reply struct {
 	// Started is true only when a Start order ran and the workload came up; an older member never sets it.
-	Started bool   `json:"started,omitempty"`
-	OK      bool   `json:"ok"`
-	Error   string `json:"error,omitempty"`
-	Epoch   uint64 `json:"epoch,omitempty"`
+	Started bool `json:"started,omitempty"`
+	// Restored is true only when the Start order's backup was restored; an older member never sets it.
+	Restored bool   `json:"restored,omitempty"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"error,omitempty"`
+	Epoch    uint64 `json:"epoch,omitempty"`
 }
 
 // ErrStale is a member refusing an older epoch.
