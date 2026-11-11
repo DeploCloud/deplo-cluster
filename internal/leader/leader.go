@@ -102,6 +102,8 @@ type cluster struct {
 	heard int
 	// deplo is when the control plane last named this epoch to this leader.
 	deplo time.Time
+	// starting is the workloads a start order is out for, until it has an outcome.
+	starting map[string]bool
 }
 
 // quorum says whether that many members answering let this leader lead: more than half of them, or exactly
@@ -381,10 +383,11 @@ func (l *Leader) round(ctx context.Context, extend time.Duration) {
 // exchange sends one order to every member of the clusters that are due it: a probe where this leader is not
 // sure it leads, a renewal where it is. A quorum of answers makes it sure for SureFor.
 func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration) {
+	// id and fingerprint are read here, under the lock: a roster may replace them while the order is on its way.
 	type job struct {
-		cluster string
-		m       *member
-		order   lease.Order
+		cluster, id, fingerprint string
+		m                        *member
+		order                    lease.Order
 	}
 	var jobs []job
 	epochs := map[string]uint64{}
@@ -398,13 +401,13 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 		for _, m := range c.members {
 			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe}
 			if !probe {
-				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.placement), c.owesReturn(m.ID), int(extend/time.Second)
+				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told()), c.owesReturn(m.ID), int(extend/time.Second)
 			}
 			if extend > 0 {
 				// Kept before the order leaves: a member that took it and whose answer was lost is extended all the same.
 				c.extended[m.ID] = now.Add(lease.FenceAfter + extend)
 			}
-			jobs = append(jobs, job{id, m, o})
+			jobs = append(jobs, job{id, m.ID, m.Fingerprint, m, o})
 		}
 	}
 	if extend > 0 {
@@ -418,7 +421,7 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if l.renew(ctx, j.cluster, j.m, j.order) {
+			if l.renew(ctx, j.cluster, j.id, j.fingerprint, j.m, j.order) {
 				answered <- j.cluster
 			}
 		}()
@@ -451,10 +454,10 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 }
 
 // renew sends one order and says whether the member took it at this leader's epoch.
-func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease.Order) bool {
+func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m *member, o lease.Order) bool {
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
-	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: m.Fingerprint, Role: wire.RoleMember})
+	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
 	if err != nil {
 		return false
 	}
@@ -462,7 +465,7 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	_ = c.SetDeadline(time.Now().Add(sendTimeout))
 	// Opened only for a member that answers, never on a probe: a keep carries its destination's credentials.
 	if !o.Probe {
-		o.Keep, o.Stores = l.keepsFor(clusterID, m.ID), l.storesFor(clusterID, m.ID)
+		o.Keep, o.Stores = l.keepsFor(clusterID, id), l.storesFor(clusterID, id)
 	}
 	r, err := lease.Send(c, o)
 	if err != nil {
@@ -483,7 +486,7 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 		}
 		l.mu.Unlock()
 		if fresh {
-			l.cfg.Logf("deplo-cluster: member %s holds epoch %d, newer than %d: stepping down", m.ID, r.Epoch, o.Epoch)
+			l.cfg.Logf("deplo-cluster: member %s holds epoch %d, newer than %d: stepping down", id, r.Epoch, o.Epoch)
 			l.log.Append("superseded", clusterID, map[string]uint64{"epoch": r.Epoch})
 		}
 		return false
@@ -498,13 +501,13 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	if o.ExtendSeconds == 0 {
 		m.presumed = time.Time{}
 	}
-	if cl := l.clusters[clusterID]; cl != nil && o.ExtendSeconds == 0 && !cl.extended[m.ID].IsZero() {
-		delete(cl.extended, m.ID)
+	if cl := l.clusters[clusterID]; cl != nil && o.ExtendSeconds == 0 && !cl.extended[id].IsZero() {
+		delete(cl.extended, id)
 		l.saveFailover()
 	}
-	tell := l.cameBack(clusterID, m.ID, r.Returned)
-	has := l.stillHas(clusterID, m.ID, r.Unplaced)
-	later := l.heardLater(clusterID, m.ID, r.Later)
+	tell := l.cameBack(clusterID, id, r.Returned)
+	has := l.stillHas(clusterID, id, r.Unplaced)
+	later := l.heardLater(clusterID, id, r.Later)
 	l.mu.Unlock()
 	tell()
 	has()

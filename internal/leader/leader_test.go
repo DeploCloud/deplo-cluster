@@ -58,7 +58,9 @@ type members struct {
 	slow map[string]time.Duration
 	// now is the test's clock; renewed and extra are the lease each member holds: when it took it and what it added.
 	// has is the stacks a member still has, which it names when an order places them on no member.
-	has     map[string][]string
+	has map[string][]string
+	// onStart runs when a start order reached a member, before it answers: what happens during a long start.
+	onStart func(fp string, o lease.Order)
 	now     func() time.Time
 	renewed map[string]time.Time
 	extra   map[string]int
@@ -138,8 +140,11 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 				}
 			}
 		}
-		takes := m.restoreTakes
+		takes, hook := m.restoreTakes, m.onStart
 		m.mu.Unlock()
+		if o.Start != nil && hook != nil {
+			hook(to.Fingerprint, o)
+		}
 		if o.Start != nil && o.Start.Restore != nil {
 			time.Sleep(takes)
 		}
