@@ -60,18 +60,22 @@ func (l *Log) Append(typ, cluster string, data any) Event {
 	l.seq++
 	e := Event{Seq: l.seq, At: l.now().UTC().Format(time.RFC3339Nano), Type: typ, Cluster: cluster, Data: raw}
 	l.events = append(l.events, e)
+	// Trimmed at twice the cap, with or without a file to rewrite.
+	trimmed := len(l.events) > 2*l.max
+	if trimmed {
+		l.events = append([]Event(nil), l.events[len(l.events)-l.max:]...)
+	}
 	if l.file != "" {
-		l.persist(e)
+		l.persist(e, trimmed)
 	}
 	close(l.wake)
 	l.wake = make(chan struct{})
 	return e
 }
 
-// persist appends the line, and rewrites the file once it holds twice the cap.
-func (l *Log) persist(e Event) {
-	if len(l.events) > 2*l.max {
-		l.events = append([]Event(nil), l.events[len(l.events)-l.max:]...)
+// persist appends the line, or rewrites the file when the events were just trimmed.
+func (l *Log) persist(e Event, trimmed bool) {
+	if trimmed {
 		tmp := l.file + ".tmp"
 		if f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
 			enc := json.NewEncoder(f)

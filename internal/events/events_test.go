@@ -74,3 +74,15 @@ func TestWaitWakesOnTheNextAppend(t *testing.T) {
 		t.Fatal("did not wake")
 	}
 }
+
+// A leader with no state directory keeps its events in memory only, and no more of them than one with a file.
+func TestEventsAreTrimmedWithoutAFileToo(t *testing.T) {
+	l := events.Open("", 3, now)
+	for i := 0; i < 100; i++ {
+		l.Append("member_state", "clu_1", nil)
+	}
+	got, gap := l.Since(0)
+	if len(got) > 6 || !gap || got[len(got)-1].Seq != 100 {
+		t.Fatalf("%d events kept (gap %v), want at most twice the cap and the newest", len(got), gap)
+	}
+}
