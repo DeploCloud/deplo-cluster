@@ -235,6 +235,16 @@ func (s *Store) Drop(cluster, kind, id string) error {
 	return nil
 }
 
+// DropCluster forgets every bundle held for the cluster; none held is not an error.
+func (s *Store) DropCluster(cluster string) error {
+	if !name.MatchString(cluster) {
+		return fmt.Errorf("%q is not a usable name", cluster)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return os.RemoveAll(filepath.Join(s.dir, "bundles", cluster))
+}
+
 // List is every bundle held for the cluster, in a stable order.
 func (s *Store) List(cluster string) ([]Held, error) {
 	if !name.MatchString(cluster) {

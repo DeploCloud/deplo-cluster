@@ -213,6 +213,28 @@ func (l *Leader) SetRoster(r Roster) error {
 	return nil
 }
 
+// Forget drops a cluster the control plane deleted, or stopped giving to this leader: its members are renewed no
+// more, nothing of it moves, and its bundles and its epoch go. A pass in flight finds it gone and stops.
+func (l *Leader) Forget(clusterID string) error {
+	if clusterID == "" {
+		return errors.New("a forget names its cluster")
+	}
+	if l.cfg.Bundles != nil {
+		if err := l.cfg.Bundles.DropCluster(clusterID); err != nil {
+			return err
+		}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.clusters, clusterID)
+	delete(l.epochs, clusterID)
+	delete(l.restored, clusterID)
+	l.saveEpochs()
+	l.saveRosters()
+	l.saveFailover()
+	return nil
+}
+
 // Assign records where the leader put one workload and tells the control plane.
 type Assign struct {
 	Cluster      string   `json:"cluster"`
