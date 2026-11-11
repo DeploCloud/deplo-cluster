@@ -72,7 +72,7 @@ type persisted struct {
 }
 
 func (l *Leader) newCluster(id string) *cluster {
-	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}, left: map[string]map[string]time.Time{}, kept: map[string]map[string]time.Time{}}
+	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}, left: map[string]map[string]time.Time{}, kept: map[string]map[string]time.Time{}, starting: map[string]bool{}}
 	if p, ok := l.restored[id]; ok {
 		if p.Extended != nil {
 			c.extended = p.Extended
@@ -99,8 +99,14 @@ func (l *Leader) newCluster(id string) *cluster {
 
 func (l *Leader) loadFailover() {
 	l.restored = map[string]persisted{}
-	if raw, err := os.ReadFile(filepath.Join(l.cfg.StateDir, "failover.json")); err == nil {
-		_ = json.Unmarshal(raw, &l.restored)
+	raw, err := os.ReadFile(filepath.Join(l.cfg.StateDir, "failover.json"))
+	if err == nil {
+		err = json.Unmarshal(raw, &l.restored)
+	}
+	// Safe to go on without: a member not heard since this start is presumed to hold the longest lease.
+	if err != nil && !os.IsNotExist(err) {
+		l.restored = map[string]persisted{}
+		l.cfg.Logf("deplo-cluster: failover.json cannot be read (%v): what this leader had moved or left waiting is forgotten", err)
 	}
 }
 
@@ -116,11 +122,7 @@ func (l *Leader) saveFailover() {
 	for id, c := range l.clusters {
 		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended, Returning: c.returning, Left: c.left, Kept: c.kept}
 	}
-	raw, _ := json.Marshal(out)
-	tmp := filepath.Join(l.cfg.StateDir, "failover.json.tmp")
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, filepath.Join(l.cfg.StateDir, "failover.json"))
-	}
+	l.keep("failover.json", out)
 }
 
 // reconcilePlacement is the roster's placement with the leader's own moves laid over it. A move stands until the
@@ -162,7 +164,13 @@ func (l *Leader) adoptWaiting(c *cluster, now time.Time) {
 func (l *Leader) loadRosters() {
 	var saved map[string]Roster
 	raw, err := os.ReadFile(filepath.Join(l.cfg.StateDir, "rosters.json"))
-	if err != nil || json.Unmarshal(raw, &saved) != nil {
+	if err == nil {
+		err = json.Unmarshal(raw, &saved)
+	}
+	if err != nil {
+		if !os.IsNotExist(err) {
+			l.cfg.Logf("deplo-cluster: rosters.json cannot be read (%v): serving no cluster until Deplo sends its roster", err)
+		}
 		return
 	}
 	for _, r := range saved {
@@ -182,11 +190,7 @@ func (l *Leader) saveRosters() {
 	for id, c := range l.clusters {
 		out[id] = c.roster
 	}
-	raw, _ := json.Marshal(out)
-	tmp := filepath.Join(l.cfg.StateDir, "rosters.json.tmp")
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, filepath.Join(l.cfg.StateDir, "rosters.json"))
-	}
+	l.keep("rosters.json", out)
 }
 
 // memberFacts is every member as the placement rule sees it; the caller holds l.mu.
@@ -297,8 +301,9 @@ type outcome struct {
 	member  string
 	refusal *placement.Refusal
 	skipped bool
-	// why says what skipped a move a person asked for.
-	why string
+	// why says what skipped a move; again is a skip that the next pass may not repeat, so the work is tried again.
+	why   string
+	again bool
 }
 
 func (l *Leader) startOrder(b bundles.Bundle) *lease.Start {
@@ -354,8 +359,9 @@ func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error 
 
 // relocate places one workload on a member that can take it and has it started there. It changes nothing
 // on any failure: the workload stays where it was recorded, or waits. asked is the bundle of a move a person
-// ordered, used in place of the kept one; its member is checked again right before each start.
-func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, replica int, from string, asked *bundles.Bundle) outcome {
+// ordered, used in place of the kept one. waited is a retry of what found no room. Whether the workload may
+// still run where it was is asked again right before each start, and whether this leader still leads after it.
+func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, replica int, from string, waited bool, asked *bundles.Bundle) outcome {
 	meta, err := l.cfg.Bundles.Meta(clusterID, kind, id)
 	if err != nil {
 		l.cfg.Logf("deplo-cluster: %s %s has no bundle, so it does not fail over", kind, id)
@@ -377,10 +383,22 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		from = left
 	}
+	// An automatic move asks again, a person's move was asked above and is asked again below.
+	gate := func(c *cluster) string {
+		if asked != nil {
+			return ""
+		}
+		_, why := c.mayStart(kind, id, replica, from, waited, l.cfg.Now())
+		return why
+	}
 	// A standby copy that follows the workload is promoted where it is; only when that fails is a backup restored.
 	if sb := l.standbyFor(clusterID, kind, id, from); sb != "" && b.Promote != nil {
-		if l.promote(ctx, clusterID, kind, id, replica, from, sb, b) {
+		switch l.promote(ctx, clusterID, kind, id, replica, from, sb, b, gate) {
+		case promoteOK:
+			l.noteDatabaseEnv(clusterID, kind, sb, meta.Environment)
 			return outcome{member: sb}
+		case notNow:
+			return outcome{skipped: true, again: true, why: StillAnswering}
 		}
 		exclude[sb] = true
 	}
@@ -389,7 +407,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		c := l.clusters[clusterID]
 		if c == nil || !c.leads(l.cfg.Now()) {
 			l.mu.Unlock()
-			return outcome{skipped: true, why: NotLeading}
+			return outcome{skipped: true, again: c != nil, why: NotLeading}
 		}
 		if asked != nil {
 			left, why := c.leftBy(kind, id, l.cfg.Now())
@@ -404,6 +422,10 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 			if e.Kind == kind && e.ID == id && e.Replica == replica {
 				entry = e
 			}
+		}
+		if why := gate(c); why != "" {
+			l.mu.Unlock()
+			return outcome{skipped: true, again: why == StillAnswering, why: why}
 		}
 		// What keeps data never starts empty: without a backup to restore it waits for its member.
 		if entry.SingleWriter && b.Restore == nil {
@@ -448,10 +470,13 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 			order.Start.ComposeYAML = strings.ReplaceAll(order.Start.ComposeYAML, b.Stack.Scale, strconv.Itoa(countOn(next, kind, id, ans.Member)))
 		}
 		fp := target.Fingerprint
+		key := entryKey(kind, id, replica)
+		c.starting[key] = true
 		l.mu.Unlock()
 
 		began := time.Now()
 		if err := l.sendStart(ctx, fp, order); err != nil {
+			l.endStart(clusterID, key)
 			l.cfg.Logf("deplo-cluster: %s could not start %s: %v", ans.Member, b.Stack.Slug, err)
 			exclude[ans.Member] = true
 			continue
@@ -461,7 +486,10 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		entry.Kind, entry.ID, entry.Replica = kind, id, replica
 		entry.Member = ans.Member
-		l.commit(clusterID, entry, placement.Needed(w), from, b.Restore, time.Since(began), false)
+		if !l.commit(clusterID, entry, placement.Needed(w), from, b.Restore, time.Since(began), false, order.Epoch) {
+			return outcome{skipped: true, why: NotLeading}
+		}
+		l.noteDatabaseEnv(clusterID, kind, ans.Member, meta.Environment)
 		return outcome{member: ans.Member}
 	}
 	return outcome{refusal: &placement.Refusal{Reason: "start_failed", NeededMB: placement.Needed(placement.Workload{LimitMB: meta.LimitMB, PeakMB: meta.PeakMB}), Cluster: clusterID, Workload: id}}
@@ -472,29 +500,94 @@ func canRestore(r *bundles.Restore, m *member) bool {
 	return r == nil || (!m.NoRestore && (r.StoreMember == "" || r.StoreMember == m.ID))
 }
 
-// commit records where a workload now runs, takes its memory off that member and tells the control plane.
-func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string, restored *bundles.Restore, took time.Duration, promoted bool) {
+// mayStart finds the entry an automatic move is about and says why it may not start now: the roster dropped it,
+// it is no longer where the pass found it, or the member it leaves answers again or may still hold a lease.
+// The caller holds l.mu.
+func (c *cluster) mayStart(kind, id string, replica int, from string, waited bool, now time.Time) (lease.Entry, string) {
+	var entry lease.Entry
+	found := false
+	for _, e := range c.placement {
+		if e.Kind == kind && e.ID == id && e.Replica == replica {
+			entry, found = e, true
+		}
+	}
+	switch {
+	case !found:
+		return entry, NotPlaced
+	case waited && entry.Member != "", !waited && entry.Member != from:
+		return entry, Returned
+	case waited:
+		return entry, ""
+	}
+	m := c.members[from]
+	if m == nil {
+		return entry, ""
+	}
+	held := m.presumedAlive(now) || now.Before(c.extended[from].Add(FailoverAfter-lease.FenceAfter))
+	if now.Sub(m.lastAck) < FailoverAfter || (entry.SingleWriter && held) {
+		return entry, StillAnswering
+	}
+	return entry, ""
+}
+
+// endStart forgets a start that is over, so the workload is shown where it is recorded again.
+func (l *Leader) endStart(clusterID, key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if c := l.clusters[clusterID]; c != nil {
+		delete(c.starting, key)
+	}
+}
+
+// told is the placement a renewal carries: a workload whose start is under way is shown as placed nowhere, so
+// the member it left neither runs it again nor removes it before the start has an outcome. The caller holds l.mu.
+func (c *cluster) told() []lease.Entry {
+	out := append([]lease.Entry(nil), c.placement...)
+	for i, e := range out {
+		if c.starting[entryKey(e.Kind, e.ID, e.Replica)] {
+			out[i].Member = ""
+		}
+	}
+	return out
+}
+
+// noteDatabaseEnv has the Apps of a database's Environment prefer the member it just moved to, in this pass too.
+func (l *Leader) noteDatabaseEnv(clusterID, kind, member, env string) {
+	if kind != "database" || env == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if c := l.clusters[clusterID]; c != nil {
+		if m := c.members[member]; m != nil && !slices.Contains(m.DatabaseEnvs, env) {
+			m.DatabaseEnvs = append(slices.Clone(m.DatabaseEnvs), env)
+		}
+	}
+}
+
+// commit records where a workload now runs, takes its memory off that member and tells the control plane. A
+// start that outlived this leader's epoch is not recorded: the cluster is another leader's to describe.
+func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string, restored *bundles.Restore, took time.Duration, promoted bool, epoch uint64) bool {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil {
 		l.mu.Unlock()
-		return
+		return false
 	}
-	found := false
-	for i := range c.placement {
-		p := &c.placement[i]
-		if p.Kind == e.Kind && p.ID == e.ID && p.Replica == e.Replica {
-			p.Member, found = e.Member, true
-		}
+	delete(c.starting, entryKey(e.Kind, e.ID, e.Replica))
+	if c.superseded || c.epoch != epoch {
+		l.mu.Unlock()
+		l.cfg.Logf("deplo-cluster: %s started %s for epoch %d, which this leader no longer leads: not recorded", e.Member, e.Slug, epoch)
+		return false
 	}
-	if !found {
+	if _, ok := c.place(e.Kind, e.ID, e.Replica, e.Member); !ok {
 		c.placement = append(c.placement, e)
 	}
 	if m := c.members[e.Member]; m != nil && needMB > 0 {
 		m.FreeMB -= needMB
 	}
 	key := entryKey(e.Kind, e.ID, e.Replica)
-	a := authority{At: l.cfg.Now(), Entry: e, From: from, Reason: StoppedAnswering}
+	a := authority{At: l.cfg.Now(), Entry: e, Told: Told{From: from, Reason: StoppedAnswering}}
 	moved := map[string]any{"kind": e.Kind, "workloadId": e.ID, "from": from, "to": e.Member, "reason": StoppedAnswering}
 	if restored != nil {
 		a.BackupID, a.BackupAt = restored.BackupID, restored.TakenAt
@@ -511,12 +604,12 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 	c.noteLeft(from, e, a.At)
 	c.standbys = c.keptStandbys(c.standbys)
 	members := replicaMembers(c.placement, e.Kind, e.ID)
-	epoch := c.epoch
 	l.saveFailover()
 	l.mu.Unlock()
-	l.log.Append("placement", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "members": members, "epoch": epoch})
+	l.tellPlacement(clusterID, e.Kind, e.ID, members, epoch)
 	ev := l.log.Append("failed_over", clusterID, moved)
 	l.stamp(clusterID, key, ev.Seq)
+	return true
 }
 
 // stamp notes which event told the control plane about a move, so one that missed the event can tell.
@@ -548,7 +641,7 @@ func replicaMembers(placement []lease.Entry, kind, id string) []string {
 }
 
 // wait leaves a workload without a member and queues it for the next retry.
-func (l *Leader) wait(clusterID string, e lease.Entry, from, reason string) {
+func (l *Leader) wait(clusterID string, e lease.Entry, from, reason, why string) {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil {
@@ -556,21 +649,15 @@ func (l *Leader) wait(clusterID string, e lease.Entry, from, reason string) {
 		return
 	}
 	e.Member = ""
-	for i := range c.placement {
-		p := &c.placement[i]
-		if p.Kind == e.Kind && p.ID == e.ID && p.Replica == e.Replica {
-			p.Member = ""
-		}
-	}
+	c.place(e.Kind, e.ID, e.Replica, "")
 	key := entryKey(e.Kind, e.ID, e.Replica)
-	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, From: from, Reason: reason}
+	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, Told: Told{From: from, Reason: reason, Wait: why}}
 	c.waiting[key] = &Waiting{Kind: e.Kind, ID: e.ID, Replica: e.Replica, From: from, Reason: reason, Slug: e.Slug, NextTry: l.cfg.Now().Add(RetryEvery)}
 	members := replicaMembers(c.placement, e.Kind, e.ID)
 	epoch := c.epoch
 	l.saveFailover()
 	l.mu.Unlock()
-	ev := l.log.Append("placement", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "members": members, "epoch": epoch})
-	l.stamp(clusterID, key, ev.Seq)
+	l.stamp(clusterID, key, l.tellPlacement(clusterID, e.Kind, e.ID, members, epoch).Seq)
 }
 
 type failoverJob struct {
@@ -664,7 +751,7 @@ func (l *Leader) Failover(ctx context.Context) {
 	for _, j := range jobs {
 		l.runJob(ctx, j)
 	}
-	for _, r := range retries {
+	for _, r := range l.inOrder(retries) {
 		l.retry(ctx, r)
 	}
 	for _, m := range moves {
@@ -683,6 +770,34 @@ func (l *Leader) restorable(clusterID string, e lease.Entry, member string) bool
 	return err == nil && m.Restore != nil && m.Restore.StoreMember != member
 }
 
+// inOrder puts each cluster's retries in the failover order: databases first, also the second time round.
+func (l *Leader) inOrder(retries []retryJob) []retryJob {
+	var clusters []string
+	by := map[string][]retryJob{}
+	for _, r := range retries {
+		if by[r.cluster] == nil {
+			clusters = append(clusters, r.cluster)
+		}
+		by[r.cluster] = append(by[r.cluster], r)
+	}
+	out := make([]retryJob, 0, len(retries))
+	for _, id := range clusters {
+		meta, jobs := map[string]bundles.Meta{}, map[string]retryJob{}
+		var entries []lease.Entry
+		for _, r := range by[id] {
+			if m, err := l.cfg.Bundles.Meta(id, r.w.Kind, r.w.ID); err == nil {
+				meta[r.w.Kind+"/"+r.w.ID] = m
+			}
+			jobs[entryKey(r.w.Kind, r.w.ID, r.w.Replica)] = r
+			entries = append(entries, lease.Entry{Kind: r.w.Kind, ID: r.w.ID, Replica: r.w.Replica})
+		}
+		for _, e := range Order(entries, meta) {
+			out = append(out, jobs[entryKey(e.Kind, e.ID, e.Replica)])
+		}
+	}
+	return out
+}
+
 func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 	meta := map[string]bundles.Meta{}
 	var movable []lease.Entry
@@ -699,18 +814,28 @@ func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 		NeededMB int    `json:"neededMb"`
 	}
 	moved, waiting := []string{}, []left{}
+	again := false
 	for _, e := range Order(movable, meta) {
-		o := l.relocate(ctx, j.cluster, e.Kind, e.ID, e.Replica, j.from, nil)
+		o := l.relocate(ctx, j.cluster, e.Kind, e.ID, e.Replica, j.from, false, nil)
 		switch {
 		case o.skipped:
+			again = again || o.again
 		case o.refusal != nil:
-			l.wait(j.cluster, e, j.from, StoppedAnswering)
+			l.wait(j.cluster, e, j.from, StoppedAnswering, string(o.refusal.Reason))
 			if !slices.ContainsFunc(waiting, func(w left) bool { return w.Kind == e.Kind && w.ID == e.ID }) {
 				waiting = append(waiting, left{e.Kind, e.ID, string(o.refusal.Reason), o.refusal.NeededMB})
 			}
 		case !slices.Contains(moved, e.ID):
 			moved = append(moved, e.ID)
 		}
+	}
+	if again {
+		// What this pass could not decide is not dealt with: the next pass looks at the member afresh.
+		l.mu.Lock()
+		if c := l.clusters[j.cluster]; c != nil {
+			delete(c.moved, j.from)
+		}
+		l.mu.Unlock()
 	}
 	if len(moved)+len(waiting) > 0 {
 		l.log.Append("failover", j.cluster, map[string]any{"member": j.from, "reason": StoppedAnswering, "moved": moved, "waiting": waiting})
@@ -719,8 +844,8 @@ func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 
 func (l *Leader) retry(ctx context.Context, r retryJob) {
 	e := lease.Entry{Kind: r.w.Kind, ID: r.w.ID, Replica: r.w.Replica, Slug: r.w.Slug}
-	o := l.relocate(ctx, r.cluster, e.Kind, e.ID, e.Replica, r.w.From, nil)
-	if o.member != "" || o.skipped {
+	o := l.relocate(ctx, r.cluster, e.Kind, e.ID, e.Replica, r.w.From, true, nil)
+	if o.member != "" || (o.skipped && !o.again) {
 		if o.skipped {
 			l.mu.Lock()
 			if c := l.clusters[r.cluster]; c != nil {
@@ -733,8 +858,14 @@ func (l *Leader) retry(ctx context.Context, r retryJob) {
 	}
 	l.mu.Lock()
 	if c := l.clusters[r.cluster]; c != nil {
-		if w := c.waiting[entryKey(e.Kind, e.ID, e.Replica)]; w != nil {
+		key := entryKey(e.Kind, e.ID, e.Replica)
+		if w := c.waiting[key]; w != nil {
 			w.NextTry = l.cfg.Now().Add(RetryEvery)
+			// A retry may be refused for another reason than the first try was.
+			if a, ok := c.auth[key]; ok && o.refusal != nil {
+				a.Wait = string(o.refusal.Reason)
+				c.auth[key] = a
+			}
 			l.saveFailover()
 		}
 	}

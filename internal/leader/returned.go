@@ -31,14 +31,7 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 	}
 	// A leader that restarted since it moved this member's work still owes it the question.
 	c.returning[memberID] = true
-	type placed struct {
-		kind, id string
-		members  []string
-	}
-	var told []placed
-	for _, e := range back {
-		told = append(told, placed{e.Kind, e.ID, replicaMembers(c.placement, e.Kind, e.ID)})
-	}
+	tell := l.placementOf(clusterID, c, back)
 	var stopped []Stopped
 	var data map[string]any
 	if report != nil {
@@ -62,12 +55,9 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 		}
 		delete(c.left, memberID)
 	}
-	epoch := c.epoch
 	l.saveFailover()
 	return func() {
-		for _, p := range told {
-			l.log.Append("placement", clusterID, map[string]any{"kind": p.kind, "workloadId": p.id, "members": p.members, "epoch": epoch})
-		}
+		tell()
 		if data != nil {
 			l.log.Append("member_returned", clusterID, data)
 		}
@@ -81,13 +71,9 @@ func (l *Leader) giveBack(c *cluster, memberID string, its func(*Waiting) bool) 
 		if !its(w) {
 			continue
 		}
-		for i := range c.placement {
-			p := &c.placement[i]
-			if p.Kind == w.Kind && p.ID == w.ID && p.Replica == w.Replica {
-				p.Member = memberID
-				c.auth[key] = authority{At: l.cfg.Now(), Entry: *p, Reason: Returned}
-				back = append(back, *p)
-			}
+		if p, ok := c.place(w.Kind, w.ID, w.Replica, memberID); ok {
+			c.auth[key] = authority{At: l.cfg.Now(), Entry: p, Told: Told{Reason: Returned}}
+			back = append(back, p)
 		}
 		delete(c.waiting, key)
 	}
@@ -108,6 +94,14 @@ func (l *Leader) stillHas(clusterID, memberID string, slugs []string) func() {
 	if len(back) == 0 {
 		return func() {}
 	}
+	tell := l.placementOf(clusterID, c, back)
+	l.saveFailover()
+	return tell
+}
+
+// placementOf reads where the replicas of each given-back workload are now and returns what tells the control
+// plane, to run once l.mu is released. The caller holds l.mu.
+func (l *Leader) placementOf(clusterID string, c *cluster, back []lease.Entry) func() {
 	type placed struct {
 		kind, id string
 		members  []string
@@ -117,10 +111,9 @@ func (l *Leader) stillHas(clusterID, memberID string, slugs []string) func() {
 		told = append(told, placed{e.Kind, e.ID, replicaMembers(c.placement, e.Kind, e.ID)})
 	}
 	epoch := c.epoch
-	l.saveFailover()
 	return func() {
 		for _, p := range told {
-			l.log.Append("placement", clusterID, map[string]any{"kind": p.kind, "workloadId": p.id, "members": p.members, "epoch": epoch})
+			l.tellPlacement(clusterID, p.kind, p.id, p.members, epoch)
 		}
 	}
 }

@@ -110,7 +110,7 @@ func (l *Leader) Move(r MoveRequest) MoveAnswer {
 // runMove makes one asked-for move. One ask is one try: a failure is reported, never retried on its own.
 func (l *Leader) runMove(ctx context.Context, m pendingMove) {
 	b := m.bundle
-	o := l.relocate(ctx, m.cluster, b.Kind, b.Workload, 0, "", &b)
+	o := l.relocate(ctx, m.cluster, b.Kind, b.Workload, 0, "", false, &b)
 	if o.member != "" {
 		return
 	}

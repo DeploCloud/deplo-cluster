@@ -76,13 +76,27 @@ func (l *Leader) standbyFor(clusterID, kind, id, from string) string {
 	return c.standbyOn(kind, id, from, l.cfg.Now())
 }
 
+type promotion int
+
+const (
+	promoteFailed promotion = iota
+	promoteOK
+	// notNow is a promotion the gate refused: the workload may still run where it was.
+	notNow
+)
+
 // promote has the standby's member promote the copy and start the workload's stack over it. Nothing is restored.
-func (l *Leader) promote(ctx context.Context, clusterID, kind, id string, replica int, from, to string, b bundles.Bundle) bool {
+// gate is asked right before the order leaves, like any start.
+func (l *Leader) promote(ctx context.Context, clusterID, kind, id string, replica int, from, to string, b bundles.Bundle, gate func(*cluster) string) promotion {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil || !c.leads(l.cfg.Now()) || c.members[to] == nil {
 		l.mu.Unlock()
-		return false
+		return promoteFailed
+	}
+	if gate(c) != "" {
+		l.mu.Unlock()
+		return notNow
 	}
 	entry := lease.Entry{Kind: kind, ID: id, Replica: replica, Slug: b.Stack.Slug, SingleWriter: true}
 	next := append([]lease.Entry(nil), c.placement...)
@@ -97,14 +111,19 @@ func (l *Leader) promote(ctx context.Context, clusterID, kind, id string, replic
 	start.Promote = &lease.Promote{Container: b.Promote.Container, User: b.Promote.User, Command: b.Promote.Command}
 	order := lease.Order{Cluster: clusterID, Member: to, Epoch: c.epoch, Placement: c.orderPlacement(next), Start: start, Return: c.returning[to]}
 	fp := c.members[to].Fingerprint
+	key := entryKey(kind, id, replica)
+	c.starting[key] = true
 	l.mu.Unlock()
 
 	if err := l.sendStart(ctx, fp, order); err != nil {
+		l.endStart(clusterID, key)
 		l.cfg.Logf("deplo-cluster: %s could not promote the standby copy of %s: %v", to, b.Stack.Slug, err)
-		return false
+		return promoteFailed
 	}
 	entry.Member = to
 	// The copy's memory was already counted on its member.
-	l.commit(clusterID, entry, 0, from, nil, 0, true)
-	return true
+	if !l.commit(clusterID, entry, 0, from, nil, 0, true, order.Epoch) {
+		return notNow
+	}
+	return promoteOK
 }

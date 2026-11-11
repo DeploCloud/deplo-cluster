@@ -98,6 +98,10 @@ func TestALeaderThatTakesOverWithFewerThanHalfRenewsNobody(t *testing.T) {
 	if _, leading := leads(f.l); !leading {
 		t.Fatal("the leader with the larger side stepped down")
 	}
+	// Deplo reads which of the two would move work right now: neither was told it was replaced.
+	if !f.l.Snapshot().Clusters["clu_1"].Leads || g.l.Snapshot().Clusters["clu_1"].Leads {
+		t.Fatal("the snapshot must say the larger side leads and the one that hears too few does not")
+	}
 }
 
 // Half and half: the old leader with srv_a, Deplo's machine with srv_b. Deplo's word breaks the tie, and it

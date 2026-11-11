@@ -19,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
 
+	"github.com/DeploCloud/deplo-cluster/internal/statefile"
 	"github.com/DeploCloud/deplo-cluster/internal/wire"
 )
 
@@ -163,14 +164,12 @@ func (r *Relay) save() {
 		}
 	}
 	raw, _ := json.Marshal(st)
-	tmp := r.cfg.StateFile + ".tmp"
-	if err := os.MkdirAll(filepath.Dir(r.cfg.StateFile), 0o700); err == nil {
-		if err = os.WriteFile(tmp, raw, 0o600); err == nil {
-			err = os.Rename(tmp, r.cfg.StateFile)
-		}
-		if err != nil {
-			r.cfg.Logf("deplo-cluster relay: keep the roster: %v", err)
-		}
+	err := os.MkdirAll(filepath.Dir(r.cfg.StateFile), 0o700)
+	if err == nil {
+		err = statefile.Write(r.cfg.StateFile, raw)
+	}
+	if err != nil {
+		r.cfg.Logf("deplo-cluster relay: keep the roster: %v", err)
 	}
 }
 
@@ -198,6 +197,10 @@ func (r *Relay) load() {
 		}
 	}
 }
+
+// MaxStreams is how many streams one party may hold open at a time; one more is closed unanswered.
+// ponytail: every connection an App holds to a database on another member is one, so the cap is generous.
+var MaxStreams = 4096
 
 var yamuxConfig = func() *yamux.Config {
 	c := yamux.DefaultConfig()
@@ -259,12 +262,21 @@ func (r *Relay) hold(req *http.Request, ws *websocket.Conn) {
 		return
 	}
 	defer r.unregister(s)
+	slots := make(chan struct{}, MaxStreams)
 	for {
 		st, err := mux.AcceptStream()
 		if err != nil {
 			return
 		}
-		go r.handleStream(s, st)
+		select {
+		case slots <- struct{}{}:
+			go func() {
+				defer func() { <-slots }()
+				r.handleStream(s, st)
+			}()
+		default:
+			st.Close()
+		}
 	}
 }
 
@@ -364,19 +376,21 @@ func cut(s *yamux.Stream) {
 	_ = s.Close()
 }
 
-// clientAddress is the last X-Forwarded-For hop, the one the proxy in front appended, else the peer.
+// clientAddress is who a connection attempt is counted against: the peer, and with it the last X-Forwarded-For
+// hop when there is one. The hop alone would let anyone who reaches the door directly (a container on this host)
+// write a member's address and spend its budget; the peer cannot be forged.
 func clientAddress(req *http.Request) string {
+	peer, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		peer = req.RemoteAddr
+	}
 	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
 		if hop := strings.TrimSpace(parts[len(parts)-1]); hop != "" {
-			return hop
+			return peer + "|" + hop
 		}
 	}
-	host, _, err := net.SplitHostPort(req.RemoteAddr)
-	if err != nil {
-		return req.RemoteAddr
-	}
-	return host
+	return peer
 }
 
 type limiter struct {

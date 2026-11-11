@@ -31,6 +31,10 @@ for the rules, `../deplo/CONTEXT.md` for the vocabulary (use those words) and
 - `internal/leader/` - the leader: renews leases, tracks member state, serves `/call/*` and `/watch` on its local socket.
 - `internal/party/` - a party's side (leader or member): dials out to every relay, never listens.
 
+`internal/party/party.go`, `internal/wire/` and `internal/lease/` each have a **hand-kept copy** in `deplo-agent`
+(`internal/clusterlink/`). Change both sides in one go, new fields with `omitempty`; the agent's
+`internal/clusterlink/copies_test.go` fails when they drift.
+
 ## Commands
 
 `make build` · `make test` · `make vet` · `make fmt`.

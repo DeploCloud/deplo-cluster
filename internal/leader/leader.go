@@ -16,6 +16,7 @@ import (
 	"github.com/DeploCloud/deplo-cluster/internal/bundles"
 	"github.com/DeploCloud/deplo-cluster/internal/events"
 	"github.com/DeploCloud/deplo-cluster/internal/lease"
+	"github.com/DeploCloud/deplo-cluster/internal/statefile"
 	"github.com/DeploCloud/deplo-cluster/internal/wire"
 )
 
@@ -102,6 +103,8 @@ type cluster struct {
 	heard int
 	// deplo is when the control plane last named this epoch to this leader.
 	deplo time.Time
+	// starting is the workloads a start order is out for, until it has an outcome.
+	starting map[string]bool
 }
 
 // quorum says whether that many members answering let this leader lead: more than half of them, or exactly
@@ -120,10 +123,17 @@ func (c *cluster) leads(now time.Time) bool {
 type authority struct {
 	At    time.Time   `json:"at"`
 	Entry lease.Entry `json:"entry"`
-	// From and Reason say what happened; Seq is the event that told the control plane, for one that missed it.
-	From   string `json:"from,omitempty"`
-	Reason string `json:"reason,omitempty"`
-	Seq    uint64 `json:"seq,omitempty"`
+	Told
+}
+
+// Told is what happened to a replica the leader moved or left waiting, as the snapshot and the kept state hold it.
+type Told struct {
+	From   string `json:"from"`
+	Reason string `json:"reason"`
+	// Seq is the event that told the control plane, for one that missed it.
+	Seq uint64 `json:"seq"`
+	// Wait is why a waiting replica found no member (the placement's refusal).
+	Wait string `json:"wait,omitempty"`
 	// BackupID and BackupAt name the backup a moved workload was restored from; RestoreMs is how long that took.
 	BackupID  string `json:"backupId,omitempty"`
 	BackupAt  string `json:"backupAt,omitempty"`
@@ -165,28 +175,40 @@ func New(cfg Config) *Leader {
 	}
 	l := &Leader{cfg: cfg, log: events.Open(file, MaxEvents, cfg.Now), clusters: map[string]*cluster{}, epochs: map[string]uint64{}}
 	if cfg.StateDir != "" {
-		if raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "epochs.json")); err == nil {
-			_ = json.Unmarshal(raw, &l.epochs)
+		raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "epochs.json"))
+		if err == nil {
+			err = json.Unmarshal(raw, &l.epochs)
 		}
 		l.loadFailover()
+		// Without the epochs it held, this leader cannot tell an old roster from the current one: it waits for Deplo's.
+		if err != nil && !os.IsNotExist(err) {
+			l.epochs = map[string]uint64{}
+			cfg.Logf("deplo-cluster: epochs.json cannot be read (%v): serving no cluster until Deplo sends its roster", err)
+			return l
+		}
 		l.loadRosters()
 	}
 	return l
 }
 
-// Events is the buffer a watcher reads.
-func (l *Leader) Events() *events.Log { return l.log }
-
-func (l *Leader) saveEpochs() {
+// keep writes one state file whole; a failure is logged, since the state in memory is still right.
+func (l *Leader) keep(name string, v any) {
 	if l.cfg.StateDir == "" {
 		return
 	}
-	raw, _ := json.Marshal(l.epochs)
-	tmp := filepath.Join(l.cfg.StateDir, "epochs.json.tmp")
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, filepath.Join(l.cfg.StateDir, "epochs.json"))
+	raw, err := json.Marshal(v)
+	if err == nil {
+		err = statefile.Write(filepath.Join(l.cfg.StateDir, name), raw)
+	}
+	if err != nil {
+		l.cfg.Logf("deplo-cluster: could not keep %s: %v", name, err)
 	}
 }
+
+// Events is the buffer a watcher reads.
+func (l *Leader) Events() *events.Log { return l.log }
+
+func (l *Leader) saveEpochs() { l.keep("epochs.json", l.epochs) }
 
 // Roster is the control plane's picture of one cluster: its epoch, its members and where it put each workload.
 type Roster struct {
@@ -355,8 +377,25 @@ func (l *Leader) Assign(a Assign) error {
 	epoch := c.epoch
 	l.saveFailover()
 	l.mu.Unlock()
-	l.log.Append("placement", a.Cluster, map[string]any{"kind": a.Kind, "workloadId": a.ID, "members": a.Members, "epoch": epoch})
+	l.tellPlacement(a.Cluster, a.Kind, a.ID, a.Members, epoch)
 	return nil
+}
+
+// tellPlacement is the one event that says where a workload's replicas are.
+func (l *Leader) tellPlacement(clusterID, kind, id string, members []string, epoch uint64) events.Event {
+	return l.log.Append("placement", clusterID, map[string]any{"kind": kind, "workloadId": id, "members": members, "epoch": epoch})
+}
+
+// place records which member runs one replica and returns its entry as it stands now; false when the placement
+// does not hold that replica. The caller holds l.mu.
+func (c *cluster) place(kind, id string, replica int, member string) (lease.Entry, bool) {
+	for i := range c.placement {
+		if p := &c.placement[i]; p.Kind == kind && p.ID == id && p.Replica == replica {
+			p.Member = member
+			return *p, true
+		}
+	}
+	return lease.Entry{}, false
 }
 
 // Tick renews every member's lease once, then reports each member whose state changed.
@@ -381,10 +420,11 @@ func (l *Leader) round(ctx context.Context, extend time.Duration) {
 // exchange sends one order to every member of the clusters that are due it: a probe where this leader is not
 // sure it leads, a renewal where it is. A quorum of answers makes it sure for SureFor.
 func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration) {
+	// id and fingerprint are read here, under the lock: a roster may replace them while the order is on its way.
 	type job struct {
-		cluster string
-		m       *member
-		order   lease.Order
+		cluster, id, fingerprint string
+		m                        *member
+		order                    lease.Order
 	}
 	var jobs []job
 	epochs := map[string]uint64{}
@@ -398,13 +438,13 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 		for _, m := range c.members {
 			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe}
 			if !probe {
-				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.placement), c.owesReturn(m.ID), int(extend/time.Second)
+				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told()), c.owesReturn(m.ID), int(extend/time.Second)
 			}
 			if extend > 0 {
 				// Kept before the order leaves: a member that took it and whose answer was lost is extended all the same.
 				c.extended[m.ID] = now.Add(lease.FenceAfter + extend)
 			}
-			jobs = append(jobs, job{id, m, o})
+			jobs = append(jobs, job{id, m.ID, m.Fingerprint, m, o})
 		}
 	}
 	if extend > 0 {
@@ -418,7 +458,7 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if l.renew(ctx, j.cluster, j.m, j.order) {
+			if l.renew(ctx, j.cluster, j.id, j.fingerprint, j.m, j.order) {
 				answered <- j.cluster
 			}
 		}()
@@ -451,10 +491,10 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 }
 
 // renew sends one order and says whether the member took it at this leader's epoch.
-func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease.Order) bool {
+func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m *member, o lease.Order) bool {
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
-	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: m.Fingerprint, Role: wire.RoleMember})
+	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
 	if err != nil {
 		return false
 	}
@@ -462,7 +502,7 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	_ = c.SetDeadline(time.Now().Add(sendTimeout))
 	// Opened only for a member that answers, never on a probe: a keep carries its destination's credentials.
 	if !o.Probe {
-		o.Keep, o.Stores = l.keepsFor(clusterID, m.ID), l.storesFor(clusterID, m.ID)
+		o.Keep, o.Stores = l.keepsFor(clusterID, id), l.storesFor(clusterID, id)
 	}
 	r, err := lease.Send(c, o)
 	if err != nil {
@@ -483,7 +523,7 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 		}
 		l.mu.Unlock()
 		if fresh {
-			l.cfg.Logf("deplo-cluster: member %s holds epoch %d, newer than %d: stepping down", m.ID, r.Epoch, o.Epoch)
+			l.cfg.Logf("deplo-cluster: member %s holds epoch %d, newer than %d: stepping down", id, r.Epoch, o.Epoch)
 			l.log.Append("superseded", clusterID, map[string]uint64{"epoch": r.Epoch})
 		}
 		return false
@@ -498,13 +538,13 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	if o.ExtendSeconds == 0 {
 		m.presumed = time.Time{}
 	}
-	if cl := l.clusters[clusterID]; cl != nil && o.ExtendSeconds == 0 && !cl.extended[m.ID].IsZero() {
-		delete(cl.extended, m.ID)
+	if cl := l.clusters[clusterID]; cl != nil && o.ExtendSeconds == 0 && !cl.extended[id].IsZero() {
+		delete(cl.extended, id)
 		l.saveFailover()
 	}
-	tell := l.cameBack(clusterID, m.ID, r.Returned)
-	has := l.stillHas(clusterID, m.ID, r.Unplaced)
-	later := l.heardLater(clusterID, m.ID, r.Later)
+	tell := l.cameBack(clusterID, id, r.Returned)
+	has := l.stillHas(clusterID, id, r.Unplaced)
+	later := l.heardLater(clusterID, id, r.Later)
 	l.mu.Unlock()
 	tell()
 	has()
@@ -581,10 +621,12 @@ type MemberView struct {
 
 // ClusterView is one cluster as the snapshot shows it.
 type ClusterView struct {
-	Epoch      uint64        `json:"epoch"`
-	Superseded bool          `json:"superseded"`
-	Members    []MemberView  `json:"members"`
-	Placement  []lease.Entry `json:"placement"`
+	Epoch      uint64 `json:"epoch"`
+	Superseded bool   `json:"superseded"`
+	// Leads says enough members answer for this leader to renew and move work right now.
+	Leads     bool          `json:"leads"`
+	Members   []MemberView  `json:"members"`
+	Placement []lease.Entry `json:"placement"`
 	// Moves are the placements the leader made on its own that no roster has repeated yet.
 	Moves []Move `json:"moves"`
 }
@@ -592,15 +634,7 @@ type ClusterView struct {
 // Move is one replica the leader moved or left waiting (Member empty), and why.
 type Move struct {
 	lease.Entry
-	From   string `json:"from"`
-	Reason string `json:"reason"`
-	Seq    uint64 `json:"seq"`
-	// BackupID and BackupAt name the backup the workload was restored from, when it was; RestoreMs is how long that took.
-	BackupID  string `json:"backupId,omitempty"`
-	BackupAt  string `json:"backupAt,omitempty"`
-	RestoreMs int64  `json:"restoreMs,omitempty"`
-	// Promoted says the workload's standby copy was promoted instead.
-	Promoted bool `json:"promoted,omitempty"`
+	Told
 }
 
 // Snapshot is the whole truth now, for the control plane to reconcile against after a replay.
@@ -615,14 +649,14 @@ func (l *Leader) Snapshot() Snapshot {
 	defer l.mu.Unlock()
 	s := Snapshot{Head: l.log.Head(), Clusters: map[string]ClusterView{}}
 	for id, c := range l.clusters {
-		v := ClusterView{Epoch: c.epoch, Superseded: c.superseded, Members: []MemberView{}, Placement: append([]lease.Entry{}, c.placement...)}
+		v := ClusterView{Epoch: c.epoch, Superseded: c.superseded, Leads: c.leads(l.cfg.Now()), Members: []MemberView{}, Placement: append([]lease.Entry{}, c.placement...)}
 		for _, m := range c.members {
 			v.Members = append(v.Members, MemberView{ID: m.ID, State: string(m.state)})
 		}
 		sort.Slice(v.Members, func(i, j int) bool { return v.Members[i].ID < v.Members[j].ID })
 		v.Moves = []Move{}
 		for _, a := range c.auth {
-			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq, BackupID: a.BackupID, BackupAt: a.BackupAt, RestoreMs: a.RestoreMs, Promoted: a.Promoted})
+			v.Moves = append(v.Moves, Move{Entry: a.Entry, Told: a.Told})
 		}
 		sort.Slice(v.Moves, func(i, j int) bool {
 			a, b := v.Moves[i], v.Moves[j]
