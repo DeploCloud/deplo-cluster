@@ -39,10 +39,12 @@ type members struct {
 	// starts are the start orders each member was given; refuse makes a member fail them.
 	starts map[string][]lease.Order
 	refuse map[string]bool
+	// returned is what a member that came back says it removed, once the leader asks.
+	returned map[string]*lease.Returned
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, returned: map[string]*lease.Returned{}}
 }
 
 func (m *members) dial(_ context.Context, to wire.Party) (net.Conn, error) {
@@ -68,6 +70,9 @@ func (m *members) dial(_ context.Context, to wire.Party) (net.Conn, error) {
 		} else {
 			m.epoch[to.Fingerprint] = o.Epoch
 			m.orders[to.Fingerprint] = append(m.orders[to.Fingerprint], o)
+			if o.Return {
+				r.Returned = m.returned[to.Fingerprint]
+			}
 			if o.Start != nil {
 				m.starts[to.Fingerprint] = append(m.starts[to.Fingerprint], o)
 				r.Started = !m.refuse[to.Fingerprint]

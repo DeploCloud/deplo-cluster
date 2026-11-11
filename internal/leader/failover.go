@@ -42,13 +42,17 @@ type Waiting struct {
 func entryKey(kind, id string, replica int) string { return fmt.Sprintf("%s/%s/%d", kind, id, replica) }
 
 type persisted struct {
-	Waiting map[string]*Waiting  `json:"waiting"`
-	Auth    map[string]authority `json:"auth"`
+	Waiting   map[string]*Waiting  `json:"waiting"`
+	Auth      map[string]authority `json:"auth"`
+	Returning map[string]bool      `json:"returning,omitempty"`
 }
 
 func (l *Leader) newCluster(id string) *cluster {
-	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}}
+	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}}
 	if p, ok := l.restored[id]; ok {
+		if p.Returning != nil {
+			c.returning = p.Returning
+		}
 		if p.Waiting != nil {
 			c.waiting = p.Waiting
 		}
@@ -77,7 +81,7 @@ func (l *Leader) saveFailover() {
 		out[id] = p
 	}
 	for id, c := range l.clusters {
-		out[id] = persisted{Waiting: c.waiting, Auth: c.auth}
+		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Returning: c.returning}
 	}
 	raw, _ := json.Marshal(out)
 	tmp := filepath.Join(l.cfg.StateDir, "failover.json.tmp")
@@ -327,7 +331,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		if !moved {
 			next = append(next, lease.Entry{Kind: kind, ID: id, Replica: replica, Member: ans.Member, Slug: b.Stack.Slug})
 		}
-		order := lease.Order{Cluster: clusterID, Member: ans.Member, Epoch: c.epoch, Placement: next, Start: l.startOrder(b)}
+		order := lease.Order{Cluster: clusterID, Member: ans.Member, Epoch: c.epoch, Placement: next, Start: l.startOrder(b), Return: c.returning[ans.Member]}
 		fp := target.Fingerprint
 		l.mu.Unlock()
 
@@ -588,7 +592,7 @@ func (l *Leader) Drain(ctx context.Context) {
 			continue
 		}
 		for _, m := range c.members {
-			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: append([]lease.Entry(nil), c.placement...), ExtendSeconds: int(lease.ExtendFor / time.Second)}})
+			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: append([]lease.Entry(nil), c.placement...), ExtendSeconds: int(lease.ExtendFor / time.Second), Return: c.returning[m.ID]}})
 		}
 	}
 	l.mu.Unlock()
