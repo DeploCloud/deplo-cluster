@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DeploCloud/deplo-cluster/internal/bundles"
 	"github.com/DeploCloud/deplo-cluster/internal/cluster"
 	"github.com/DeploCloud/deplo-cluster/internal/leader"
 	"github.com/DeploCloud/deplo-cluster/internal/party"
@@ -76,6 +77,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // runLeader answers the agent on its local socket and renews every member's lease through the relays.
 func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dial bool, relays, socket, stateDir string, logger *log.Logger) int {
 	var p *party.Party
+	// The party outlives ctx by one drain: the last renewals still need its connections.
+	partyCtx, stopParty := context.WithCancel(context.Background())
+	defer stopParty()
 	if dial {
 		p = party.New(party.Config{
 			Role:     wire.RoleLeader,
@@ -85,7 +89,16 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 			Accept: func(_ wire.Party, c net.Conn) { c.Close() },
 			Logf:   logger.Printf,
 		})
-		go p.Run(ctx)
+		go p.Run(partyCtx)
+	}
+	var store *bundles.Store
+	if stateDir != "" {
+		s, err := bundles.Open(stateDir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		store = s
 	}
 	l := leader.New(leader.Config{
 		Dial: func(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -96,7 +109,15 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 		},
 		StateDir: stateDir,
 		Logf:     logger.Printf,
+		Bundles:  store,
+		PathOK:   func() bool { return p != nil && p.Connected() > 0 },
 	})
+	// A planned restart extends every lease first, so no member fences itself while this leader is away.
+	defer func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		l.Drain(dctx)
+	}()
 	go l.Run(ctx)
 	if socket != "" {
 		stop, err := serveLocalSocket(l.Handler(), socket)

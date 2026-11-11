@@ -36,10 +36,13 @@ type members struct {
 	epoch  map[string]uint64 // fingerprint -> the epoch it holds
 	cut    map[string]bool
 	orders map[string][]lease.Order
+	// starts are the start orders each member was given; refuse makes a member fail them.
+	starts map[string][]lease.Order
+	refuse map[string]bool
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}}
 }
 
 func (m *members) dial(_ context.Context, to wire.Party) (net.Conn, error) {
@@ -65,6 +68,13 @@ func (m *members) dial(_ context.Context, to wire.Party) (net.Conn, error) {
 		} else {
 			m.epoch[to.Fingerprint] = o.Epoch
 			m.orders[to.Fingerprint] = append(m.orders[to.Fingerprint], o)
+			if o.Start != nil {
+				m.starts[to.Fingerprint] = append(m.starts[to.Fingerprint], o)
+				r.Started = !m.refuse[to.Fingerprint]
+				if !r.Started {
+					r = lease.Reply{Error: "no room on this disk"}
+				}
+			}
 		}
 		m.mu.Unlock()
 		raw, _ := json.Marshal(r)
