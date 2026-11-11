@@ -501,7 +501,7 @@ type retryJob struct {
 func (l *Leader) Failover(ctx context.Context) {
 	l.foMu.Lock()
 	defer l.foMu.Unlock()
-	if l.cfg.Bundles == nil || (l.cfg.PathOK != nil && !l.cfg.PathOK()) {
+	if ctx.Err() != nil || l.cfg.Bundles == nil || (l.cfg.PathOK != nil && !l.cfg.PathOK()) {
 		return
 	}
 	now := l.cfg.Now()

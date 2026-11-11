@@ -134,3 +134,19 @@ func TestTheExtensionIsTheLastOrderAMemberGets(t *testing.T) {
 		t.Fatal("a plain renewal reached the member after its lease was extended")
 	}
 }
+
+// Once the process is told to stop, the extension is the only order left to send: a renewal that started
+// after it would put every lease back to 60 s.
+func TestALeaderToldToStopSendsNoMoreRenewals(t *testing.T) {
+	f := two(t)
+	f.l.Drain(context.Background())
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.l.Tick(stopped)
+	f.l.Failover(stopped)
+	for _, fp := range []string{"fp-srv_a", "fp-srv_b"} {
+		if o := f.lastOrder(fp); o.ExtendSeconds == 0 {
+			t.Fatalf("%s got a plain renewal after its lease was extended", fp)
+		}
+	}
+}

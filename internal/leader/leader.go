@@ -266,6 +266,10 @@ func (l *Leader) Tick(ctx context.Context) {
 	var jobs []job
 	l.tickMu.Lock()
 	defer l.tickMu.Unlock()
+	// Told to stop: the drain's longer lease is the last order, and a dial does not look at a cancelled context.
+	if ctx.Err() != nil {
+		return
+	}
 	l.mu.Lock()
 	for id, c := range l.clusters {
 		if c.superseded {
