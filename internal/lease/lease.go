@@ -195,6 +195,9 @@ type Reply struct {
 	Epoch    uint64 `json:"epoch,omitempty"`
 	// Returned answers an order's Return once the member is done removing what moved away.
 	Returned *Returned `json:"returned,omitempty"`
+	// Unplaced is the stacks the order placed on no member that this member still has, running or stopped by
+	// itself: what waits for room is handed back to it, never started a second time beside it.
+	Unplaced []string `json:"unplaced,omitempty"`
 }
 
 // ErrStale is a member refusing an older epoch.

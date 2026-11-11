@@ -496,8 +496,10 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 		l.saveFailover()
 	}
 	tell := l.cameBack(clusterID, m.ID, r.Returned)
+	has := l.stillHas(clusterID, m.ID, r.Unplaced)
 	l.mu.Unlock()
 	tell()
+	has()
 	return true
 }
 

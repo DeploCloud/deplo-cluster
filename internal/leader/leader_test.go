@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -52,6 +53,8 @@ type members struct {
 	// slow is how long a member's plain renewal takes to reach it.
 	slow map[string]time.Duration
 	// now is the test's clock; renewed and extra are the lease each member holds: when it took it and what it added.
+	// has is the stacks a member still has, which it names when an order places them on no member.
+	has     map[string][]string
 	now     func() time.Time
 	renewed map[string]time.Time
 	extra   map[string]int
@@ -65,7 +68,7 @@ func (m *members) leaseEnd(fp string) time.Time {
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -108,6 +111,11 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 			}
 			if o.Return {
 				r.Returned = m.returned[to.Fingerprint]
+			}
+			for _, e := range o.Placement {
+				if e.Member == "" && slices.Contains(m.has[to.Fingerprint], e.Slug) {
+					r.Unplaced = append(r.Unplaced, e.Slug)
+				}
 			}
 			if o.Start != nil {
 				m.starts[to.Fingerprint] = append(m.starts[to.Fingerprint], o)

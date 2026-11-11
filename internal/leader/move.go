@@ -54,6 +54,9 @@ func (c *cluster) leftBy(kind, id string, now time.Time) (from, why string) {
 	}
 	if from == "" {
 		if w := c.waiting[entryKey(kind, id, 0)]; w != nil {
+			if c.mayBeHeld(w, now) {
+				return "", StillAnswering
+			}
 			from = w.From
 		}
 		return from, ""

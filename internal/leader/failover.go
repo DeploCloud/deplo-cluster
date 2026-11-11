@@ -40,6 +40,24 @@ type Waiting struct {
 	Reason  string    `json:"reason"`
 	Slug    string    `json:"slug"`
 	NextTry time.Time `json:"nextTry"`
+	// Adopted is one this leader read as waiting in a roster: it does not know which member last had it.
+	Adopted bool `json:"adopted,omitempty"`
+}
+
+// mayBeHeld says a single-writer workload this leader found waiting may still run on a member it has not
+// heard: the old leader may have handed it back. Nobody starts it until each has answered or its lease is over.
+func (c *cluster) mayBeHeld(w *Waiting, now time.Time) bool {
+	if !w.Adopted || !slices.ContainsFunc(c.placement, func(e lease.Entry) bool {
+		return e.Kind == w.Kind && e.ID == w.ID && e.Replica == w.Replica && e.SingleWriter
+	}) {
+		return false
+	}
+	for _, m := range c.members {
+		if m.presumedAlive(now) {
+			return true
+		}
+	}
+	return false
 }
 
 func entryKey(kind, id string, replica int) string { return fmt.Sprintf("%s/%s/%d", kind, id, replica) }
@@ -131,7 +149,7 @@ func (l *Leader) adoptWaiting(c *cluster, now time.Time) {
 	for _, e := range c.placement {
 		key := entryKey(e.Kind, e.ID, e.Replica)
 		if e.Member == "" && c.waiting[key] == nil {
-			c.waiting[key] = &Waiting{Kind: e.Kind, ID: e.ID, Replica: e.Replica, Reason: StoppedAnswering, Slug: e.Slug, NextTry: now.Add(RetryEvery)}
+			c.waiting[key] = &Waiting{Kind: e.Kind, ID: e.ID, Replica: e.Replica, Reason: StoppedAnswering, Slug: e.Slug, NextTry: now.Add(RetryEvery), Adopted: true}
 		}
 	}
 	l.saveFailover()
@@ -632,7 +650,7 @@ func (l *Leader) Failover(ctx context.Context) {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			if w := c.waiting[k]; !now.Before(w.NextTry) {
+			if w := c.waiting[k]; !now.Before(w.NextTry) && !c.mayBeHeld(w, now) {
 				retries = append(retries, retryJob{id, *w})
 			}
 		}

@@ -15,6 +15,12 @@ import (
 // and the control plane's picture. cutOff are members that are alive but that this leader cannot reach.
 func takeOver(t *testing.T, f *fo, cutOff ...string) *fo {
 	t.Helper()
+	return takeOverWith(t, f, snapshotRoster(f, f.l.Snapshot().Clusters["clu_1"].Epoch+1), cutOff...)
+}
+
+// takeOverWith is takeOver from the picture Deplo has, which may have missed the old leader's last events.
+func takeOverWith(t *testing.T, f *fo, picture leader.Roster, cutOff ...string) *fo {
+	t.Helper()
 	g := &fo{clk: f.clk, ms: f.ms, pathOK: true, dir: t.TempDir(), blind: map[string]bool{}}
 	var err error
 	if g.store, err = bundles.Open(t.TempDir()); err != nil {
@@ -24,7 +30,7 @@ func takeOver(t *testing.T, f *fo, cutOff ...string) *fo {
 		g.blind[id] = true
 	}
 	g.l = leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store, PathOK: func() bool { return g.pathOK }})
-	if err := g.l.SetRoster(snapshotRoster(f, f.l.Snapshot().Clusters["clu_1"].Epoch+1)); err != nil {
+	if err := g.l.SetRoster(picture); err != nil {
 		t.Fatal(err)
 	}
 	// What is live is sealed to the new leader's key.
