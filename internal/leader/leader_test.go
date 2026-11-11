@@ -45,6 +45,8 @@ type members struct {
 	startLeft map[string]time.Duration
 	// returned is what a member that came back says it removed, once the leader asks.
 	returned map[string]*lease.Returned
+	// restoreTakes is how long a member takes over a start order that restores a backup.
+	restoreTakes time.Duration
 }
 
 func newMembers() *members {
@@ -91,7 +93,11 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 				}
 			}
 		}
+		takes := m.restoreTakes
 		m.mu.Unlock()
+		if o.Start != nil && o.Start.Restore != nil {
+			time.Sleep(takes)
+		}
 		raw, _ := json.Marshal(r)
 		b.Write(append(raw, '\n'))
 	}()

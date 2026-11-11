@@ -191,3 +191,34 @@ func TestAStartThatRestoresABackupIsGivenLongerThanAPlainStart(t *testing.T) {
 		t.Fatalf("the restore was given %s, want more than %s and at most %s", left, lease.StartTimeout, lease.RestoreTimeout)
 	}
 }
+
+func TestAFailoverSaysHowLongTheRestoreTook(t *testing.T) {
+	f := two(t)
+	f.putDB(t, "db_1", "db-main", backup(""))
+	f.ms.restoreTakes = 40 * time.Millisecond
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(90 * time.Second)
+	ev, _ := f.l.Events().Since(0)
+	var took []float64
+	for _, e := range ev {
+		if e.Type != "failed_over" {
+			continue
+		}
+		var d struct {
+			Kind      string  `json:"kind"`
+			RestoreMs float64 `json:"restoreMs"`
+		}
+		_ = json.Unmarshal(e.Data, &d)
+		if (d.Kind == "database") != (d.RestoreMs > 0) {
+			t.Fatalf("restoreMs %v on a %s: only a restore is timed", d.RestoreMs, d.Kind)
+		}
+		took = append(took, d.RestoreMs)
+	}
+	if len(took) != 2 || took[0] < 40 || took[0] > 5000 {
+		t.Fatalf("restoreMs %v, want the 40 ms the member took", took)
+	}
+	// A control plane that missed the event reads the same from the snapshot.
+	if mv := f.l.Snapshot().Clusters["clu_1"].Moves; len(mv) != 2 || mv[1].RestoreMs < 40 || mv[0].RestoreMs != 0 {
+		t.Fatalf("the snapshot's moves: %+v", mv)
+	}
+}

@@ -91,9 +91,10 @@ type authority struct {
 	From   string `json:"from,omitempty"`
 	Reason string `json:"reason,omitempty"`
 	Seq    uint64 `json:"seq,omitempty"`
-	// BackupID and BackupAt name the backup a moved workload was restored from.
-	BackupID string `json:"backupId,omitempty"`
-	BackupAt string `json:"backupAt,omitempty"`
+	// BackupID and BackupAt name the backup a moved workload was restored from; RestoreMs is how long that took.
+	BackupID  string `json:"backupId,omitempty"`
+	BackupAt  string `json:"backupAt,omitempty"`
+	RestoreMs int64  `json:"restoreMs,omitempty"`
 }
 
 // Leader serves every cluster whose roster the control plane pushed.
@@ -414,9 +415,10 @@ type Move struct {
 	From   string `json:"from"`
 	Reason string `json:"reason"`
 	Seq    uint64 `json:"seq"`
-	// BackupID and BackupAt name the backup the workload was restored from, when it was.
-	BackupID string `json:"backupId,omitempty"`
-	BackupAt string `json:"backupAt,omitempty"`
+	// BackupID and BackupAt name the backup the workload was restored from, when it was; RestoreMs is how long that took.
+	BackupID  string `json:"backupId,omitempty"`
+	BackupAt  string `json:"backupAt,omitempty"`
+	RestoreMs int64  `json:"restoreMs,omitempty"`
 }
 
 // Snapshot is the whole truth now, for the control plane to reconcile against after a replay.
@@ -438,7 +440,7 @@ func (l *Leader) Snapshot() Snapshot {
 		sort.Slice(v.Members, func(i, j int) bool { return v.Members[i].ID < v.Members[j].ID })
 		v.Moves = []Move{}
 		for _, a := range c.auth {
-			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq, BackupID: a.BackupID, BackupAt: a.BackupAt})
+			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq, BackupID: a.BackupID, BackupAt: a.BackupAt, RestoreMs: a.RestoreMs})
 		}
 		sort.Slice(v.Moves, func(i, j int) bool {
 			a, b := v.Moves[i], v.Moves[j]
