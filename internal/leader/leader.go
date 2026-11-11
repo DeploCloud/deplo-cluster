@@ -53,6 +53,8 @@ type Member struct {
 	Images       []string `json:"images,omitempty"`
 	Emptying     bool     `json:"emptying,omitempty"`
 	DatabaseEnvs []string `json:"databaseEnvs,omitempty"`
+	// NoFailover is a member whose agent cannot start a moved workload: it keeps what it runs and takes over nothing.
+	NoFailover bool `json:"noFailover,omitempty"`
 }
 
 type member struct {
@@ -72,11 +74,17 @@ type cluster struct {
 	// the control plane's picture agrees, so a roster that has not seen the move yet cannot undo it.
 	waiting map[string]*Waiting
 	auth    map[string]authority
+	// roster is the last one pushed, kept so a restarted leader serves its cluster before Deplo is back.
+	roster Roster
 }
 
 type authority struct {
 	At    time.Time   `json:"at"`
 	Entry lease.Entry `json:"entry"`
+	// From and Reason say what happened; Seq is the event that told the control plane, for one that missed it.
+	From   string `json:"from,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	Seq    uint64 `json:"seq,omitempty"`
 }
 
 // Leader serves every cluster whose roster the control plane pushed.
@@ -111,6 +119,7 @@ func New(cfg Config) *Leader {
 			_ = json.Unmarshal(raw, &l.epochs)
 		}
 		l.loadFailover()
+		l.loadRosters()
 	}
 	return l
 }
@@ -176,6 +185,8 @@ func (l *Leader) SetRoster(r Roster) error {
 	if changed {
 		l.saveEpochs()
 	}
+	c.roster = r
+	l.saveRosters()
 	l.mu.Unlock()
 	if changed {
 		l.log.Append("epoch", r.Cluster, map[string]uint64{"epoch": r.Epoch})
@@ -361,6 +372,16 @@ type ClusterView struct {
 	Superseded bool          `json:"superseded"`
 	Members    []MemberView  `json:"members"`
 	Placement  []lease.Entry `json:"placement"`
+	// Moves are the placements the leader made on its own that no roster has repeated yet.
+	Moves []Move `json:"moves"`
+}
+
+// Move is one replica the leader moved or left waiting (Member empty), and why.
+type Move struct {
+	lease.Entry
+	From   string `json:"from"`
+	Reason string `json:"reason"`
+	Seq    uint64 `json:"seq"`
 }
 
 // Snapshot is the whole truth now, for the control plane to reconcile against after a replay.
@@ -380,6 +401,14 @@ func (l *Leader) Snapshot() Snapshot {
 			v.Members = append(v.Members, MemberView{ID: m.ID, State: string(m.state)})
 		}
 		sort.Slice(v.Members, func(i, j int) bool { return v.Members[i].ID < v.Members[j].ID })
+		v.Moves = []Move{}
+		for _, a := range c.auth {
+			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq})
+		}
+		sort.Slice(v.Moves, func(i, j int) bool {
+			a, b := v.Moves[i], v.Moves[j]
+			return entryKey(a.Kind, a.ID, a.Replica) < entryKey(b.Kind, b.ID, b.Replica)
+		})
 		s.Clusters[id] = v
 	}
 	return s

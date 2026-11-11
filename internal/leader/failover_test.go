@@ -190,7 +190,8 @@ func TestWhatDoesNotFitWaitsAndIsRetriedEvery30s(t *testing.T) {
 	}
 	// Room appears: the roster says srv_b has memory now. The next retry (within 30 s) places it.
 	r := leader.Roster{Cluster: "clu_1", Epoch: 1, Members: []leader.Member{
-		{ID: "srv_a", Fingerprint: "fp-srv_a", Arch: "amd64", FreeMB: 4096}, {ID: "srv_b", Fingerprint: "fp-srv_b", Arch: "amd64", FreeMB: 4096}}}
+		{ID: "srv_a", Fingerprint: "fp-srv_a", Arch: "amd64", FreeMB: 4096}, {ID: "srv_b", Fingerprint: "fp-srv_b", Arch: "amd64", FreeMB: 4096}},
+		Placement: []lease.Entry{{Kind: "app", ID: "prj_1", Slug: "web"}}}
 	if err := f.l.SetRoster(r); err != nil {
 		t.Fatal(err)
 	}
@@ -276,5 +277,154 @@ func TestPlacementPlaceUsesLeaseStateAndGivenFacts(t *testing.T) {
 	}
 	if _, err := f.l.Place(leader.PlaceRequest{Cluster: "other"}); err == nil {
 		t.Fatal("placed in a cluster this leader does not serve")
+	}
+}
+
+func (f *fo) putStack(t *testing.T, id string, s bundles.Stack) {
+	t.Helper()
+	rec, _ := age.ParseX25519Recipient(f.store.PublicKey())
+	var out bytes.Buffer
+	w, _ := age.Encrypt(&out, rec)
+	raw, _ := json.Marshal(bundles.Bundle{V: 1, Kind: "app", Workload: id, DeploymentID: "dep_" + id, Stack: s})
+	w.Write(raw)
+	w.Close()
+	if err := f.store.Put("clu_1", "app", id, "dep_"+id, out.Bytes(), bundles.Meta{Name: s.Slug}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAMovedAppKeepsItsReadyCheckRestartRuleFilesAndLateServices(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64")})
+	f.putStack(t, "prj_1", bundles.Stack{Slug: "web", ComposeYAML: "services: {}",
+		Ready:            json.RawMessage(`{"port":3000,"portRequired":true}`),
+		RestartRule:      json.RawMessage(`{"probe":"PROBE_HTTP","port":3000,"path":"/"}`),
+		StartAfterReady:  []string{"connector"},
+		Mounts:           []bundles.MountFile{{Path: "config/app.toml", Content: "a = 1"}},
+		FilesBindSources: []string{"data"}})
+	f.assign(t, "prj_1", "web", "srv_a")
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(85 * time.Second)
+	got := f.ms.starts["fp-srv_b"]
+	if len(got) != 1 {
+		t.Fatalf("start orders %+v", got)
+	}
+	s := got[0].Start
+	if string(s.Ready) != `{"port":3000,"portRequired":true}` || string(s.RestartRule) != `{"probe":"PROBE_HTTP","port":3000,"path":"/"}` {
+		t.Fatalf("ready %s restart rule %s", s.Ready, s.RestartRule)
+	}
+	if len(s.StartAfterReady) != 1 || s.StartAfterReady[0] != "connector" || len(s.Mounts) != 1 || s.Mounts[0].Content != "a = 1" ||
+		len(s.FilesBindSources) != 1 || s.FilesBindSources[0] != "data" {
+		t.Fatalf("start order %+v", s)
+	}
+}
+
+func TestAMemberWhoseAgentCannotStartAMovedAppIsNeverChosen(t *testing.T) {
+	old := roomy("amd64")
+	old.NoFailover = true
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": old, "srv_c": {Arch: "amd64", FreeMB: 1024}})
+	f.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
+	f.assign(t, "prj_1", "web", "srv_a")
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(85 * time.Second)
+	if placed(f, "prj_1") != "srv_c" || len(f.ms.starts["fp-srv_b"]) != 0 {
+		t.Fatalf("placed on %q, start orders to the old agent %d", placed(f, "prj_1"), len(f.ms.starts["fp-srv_b"]))
+	}
+	// A new App is still placed on it by the control plane: only a move needs the newer agent.
+	if ans, _ := f.l.Place(leader.PlaceRequest{Cluster: "clu_1", Workload: placementWorkload("prj_9")}); ans.Member != "srv_b" {
+		t.Fatalf("answer %+v", ans)
+	}
+}
+
+func staleRoster(members ...string) leader.Roster {
+	r := leader.Roster{Cluster: "clu_1", Epoch: 1, Placement: []lease.Entry{{Kind: "app", ID: "prj_1", Member: "srv_a", Slug: "web"}}}
+	for _, id := range members {
+		r.Members = append(r.Members, leader.Member{ID: id, Fingerprint: "fp-" + id, Arch: "amd64", FreeMB: 4096})
+	}
+	return r
+}
+
+func TestAMoveStandsHoweverLongTheControlPlaneWasAwayAndTheSnapshotNamesIt(t *testing.T) {
+	f := two(t)
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(90 * time.Second)
+	f.clk.Add(6 * time.Hour)
+	if err := f.l.SetRoster(staleRoster("srv_a", "srv_b")); err != nil {
+		t.Fatal(err)
+	}
+	if placed(f, "prj_1") != "srv_b" {
+		t.Fatal("a roster that was away for hours moved the work back")
+	}
+	moves := f.l.Snapshot().Clusters["clu_1"].Moves
+	if len(moves) != 1 || moves[0].ID != "prj_1" || moves[0].Member != "srv_b" || moves[0].From != "srv_a" || moves[0].Reason != leader.StoppedAnswering {
+		t.Fatalf("moves %+v", moves)
+	}
+	ev, _ := f.l.Events().Since(0)
+	var seq uint64
+	for _, e := range ev {
+		if e.Type == "failed_over" {
+			seq = e.Seq
+		}
+	}
+	if seq == 0 || moves[0].Seq != seq {
+		t.Fatalf("the move names event %d, the failed_over event is %d", moves[0].Seq, seq)
+	}
+	// Once the roster agrees the move is the control plane's to change again.
+	agreed := staleRoster("srv_a", "srv_b")
+	agreed.Placement[0].Member = "srv_b"
+	_ = f.l.SetRoster(agreed)
+	if got := f.l.Snapshot().Clusters["clu_1"].Moves; len(got) != 0 {
+		t.Fatalf("moves after the roster agreed: %+v", got)
+	}
+}
+
+func TestAMoveIsForgottenOnceTheWorkloadLeavesTheRoster(t *testing.T) {
+	f := two(t)
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(90 * time.Second)
+	gone := staleRoster("srv_a", "srv_b")
+	gone.Placement = nil
+	_ = f.l.SetRoster(gone)
+	snap := f.l.Snapshot().Clusters["clu_1"]
+	if len(snap.Moves) != 0 || len(snap.Placement) != 0 {
+		t.Fatalf("a deleted App is still placed: %+v %+v", snap.Moves, snap.Placement)
+	}
+}
+
+func TestAWaitingWorkloadIsNamedInTheSnapshotAndStaysWhenTheRosterRepeatsIt(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": {Arch: "amd64", FreeMB: 100}})
+	f.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
+	f.assign(t, "prj_1", "web", "srv_a")
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(85 * time.Second)
+	moves := f.l.Snapshot().Clusters["clu_1"].Moves
+	if len(moves) != 1 || moves[0].Member != "" || moves[0].From != "srv_a" {
+		t.Fatalf("moves %+v", moves)
+	}
+	r := staleRoster("srv_a", "srv_b")
+	r.Placement[0].Member = ""
+	_ = f.l.SetRoster(r)
+	f.pass(35 * time.Second)
+	if placed(f, "prj_1") != "srv_b" {
+		t.Fatalf("a waiting workload the roster repeated was not retried: %q", placed(f, "prj_1"))
+	}
+}
+
+func TestARestartedLeaderStillFailsOverWithoutTheControlPlane(t *testing.T) {
+	f := two(t)
+	state := t.TempDir()
+	first := leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: state, Bundles: f.store, PathOK: func() bool { return true }})
+	r := staleRoster("srv_a", "srv_b")
+	if err := first.SetRoster(r); err != nil {
+		t.Fatal(err)
+	}
+	// The process is replaced and nobody pushes a roster again.
+	f.l = leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: state, Bundles: f.store, PathOK: func() bool { return true }})
+	if placed(f, "prj_1") != "srv_a" {
+		t.Fatalf("a restarted leader forgot its cluster: %q", placed(f, "prj_1"))
+	}
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(90 * time.Second)
+	if placed(f, "prj_1") != "srv_b" || len(f.ms.starts["fp-srv_b"]) != 1 {
+		t.Fatalf("placed on %q after a restart", placed(f, "prj_1"))
 	}
 }

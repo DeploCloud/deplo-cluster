@@ -22,8 +22,6 @@ const (
 	FailoverAfter = 81 * time.Second
 	// RetryEvery is how often work that found no room is placed again.
 	RetryEvery = 30 * time.Second
-	// authorityFor is how long the leader's own placement beats a roster that has not caught up.
-	authorityFor = 10 * time.Minute
 	// maxStartTries bounds the members tried for one workload in one pass.
 	maxStartTries = 3
 	// StoppedAnswering is the reason a failover event carries.
@@ -88,32 +86,55 @@ func (l *Leader) saveFailover() {
 	}
 }
 
-// reconcilePlacement is the roster's placement with the leader's own recent moves laid over it, until the roster agrees.
+// reconcilePlacement is the roster's placement with the leader's own moves laid over it. A move stands until the
+// roster repeats it, however long that takes; a workload the roster no longer names is the control plane's to drop.
 func (l *Leader) reconcilePlacement(c *cluster, roster []lease.Entry) []lease.Entry {
 	out := append([]lease.Entry(nil), roster...)
-	now := l.cfg.Now()
+	at := map[string]int{}
+	for i, e := range out {
+		at[entryKey(e.Kind, e.ID, e.Replica)] = i
+	}
 	for k, a := range c.auth {
-		if now.Sub(a.At) > authorityFor {
-			delete(c.auth, k)
-			continue
-		}
-		at := -1
-		for i, e := range out {
-			if entryKey(e.Kind, e.ID, e.Replica) == k {
-				at = i
-			}
-		}
+		i, named := at[k]
 		switch {
-		case at >= 0 && out[at].Member == a.Entry.Member:
+		case !named:
 			delete(c.auth, k)
-		case at >= 0:
-			out[at].Member = a.Entry.Member
+			delete(c.waiting, k)
+		case out[i].Member == a.Entry.Member:
+			delete(c.auth, k)
 		default:
-			out = append(out, a.Entry)
+			out[i].Member = a.Entry.Member
 		}
 	}
 	l.saveFailover()
 	return out
+}
+
+func (l *Leader) loadRosters() {
+	var saved map[string]Roster
+	raw, err := os.ReadFile(filepath.Join(l.cfg.StateDir, "rosters.json"))
+	if err != nil || json.Unmarshal(raw, &saved) != nil {
+		return
+	}
+	for _, r := range saved {
+		_ = l.SetRoster(r)
+	}
+}
+
+// saveRosters keeps every cluster's last roster; the caller holds l.mu.
+func (l *Leader) saveRosters() {
+	if l.cfg.StateDir == "" {
+		return
+	}
+	out := map[string]Roster{}
+	for id, c := range l.clusters {
+		out[id] = c.roster
+	}
+	raw, _ := json.Marshal(out)
+	tmp := filepath.Join(l.cfg.StateDir, "rosters.json.tmp")
+	if os.WriteFile(tmp, raw, 0o600) == nil {
+		_ = os.Rename(tmp, filepath.Join(l.cfg.StateDir, "rosters.json"))
+	}
 }
 
 // memberFacts is every member as the placement rule sees it; the caller holds l.mu.
@@ -224,8 +245,13 @@ func (l *Leader) startOrder(b bundles.Bundle) *lease.Start {
 	for _, a := range s.RegistryAuth {
 		auth = append(auth, lease.RegistryAuth(a))
 	}
+	mounts := make([]lease.MountFile, 0, len(s.Mounts))
+	for _, m := range s.Mounts {
+		mounts = append(mounts, lease.MountFile(m))
+	}
 	return &lease.Start{DeploymentID: b.DeploymentID, Slug: s.Slug, ProjectID: s.ProjectID, ImageRef: s.ImageRef, ComposeYAML: s.ComposeYAML,
-		Network: s.Network, Env: s.Env, RegistryAuth: auth, ComposeUpArgs: s.ComposeUpArgs}
+		Network: s.Network, Env: s.Env, RegistryAuth: auth, ComposeUpArgs: s.ComposeUpArgs, Ready: s.Ready, RestartRule: s.RestartRule,
+		StartAfterReady: s.StartAfterReady, Mounts: mounts, FilesBindSources: s.FilesBindSources}
 }
 
 // sendStart gives one member the order to bring a workload up and waits for it to answer.
@@ -280,7 +306,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		var facts []placement.Member
 		for _, f := range c.memberFacts(l.cfg.Now()) {
-			if f.ID != from && !exclude[f.ID] {
+			if f.ID != from && !exclude[f.ID] && !c.members[f.ID].NoFailover {
 				facts = append(facts, f)
 			}
 		}
@@ -315,15 +341,14 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		entry.Kind, entry.ID, entry.Replica = kind, id, replica
 		entry.Member = ans.Member
-		l.commit(clusterID, entry, placement.Needed(w))
-		l.log.Append("failed_over", clusterID, map[string]any{"kind": kind, "workloadId": id, "from": from, "to": ans.Member, "reason": StoppedAnswering})
+		l.commit(clusterID, entry, placement.Needed(w), from)
 		return outcome{member: ans.Member}
 	}
 	return outcome{refusal: &placement.Refusal{Reason: "start_failed", NeededMB: placement.Needed(placement.Workload{LimitMB: meta.LimitMB, PeakMB: meta.PeakMB}), Cluster: clusterID, Workload: id}}
 }
 
 // commit records where a workload now runs, takes its memory off that member and tells the control plane.
-func (l *Leader) commit(clusterID string, e lease.Entry, needMB int) {
+func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string) {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil {
@@ -343,13 +368,29 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int) {
 	if m := c.members[e.Member]; m != nil && needMB > 0 {
 		m.FreeMB -= needMB
 	}
-	c.auth[entryKey(e.Kind, e.ID, e.Replica)] = authority{At: l.cfg.Now(), Entry: e}
-	delete(c.waiting, entryKey(e.Kind, e.ID, e.Replica))
+	key := entryKey(e.Kind, e.ID, e.Replica)
+	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, From: from, Reason: StoppedAnswering}
+	delete(c.waiting, key)
 	members := replicaMembers(c.placement, e.Kind, e.ID)
 	epoch := c.epoch
 	l.saveFailover()
 	l.mu.Unlock()
 	l.log.Append("placement", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "members": members, "epoch": epoch})
+	ev := l.log.Append("failed_over", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "from": from, "to": e.Member, "reason": StoppedAnswering})
+	l.stamp(clusterID, key, ev.Seq)
+}
+
+// stamp notes which event told the control plane about a move, so one that missed the event can tell.
+func (l *Leader) stamp(clusterID, key string, seq uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if c := l.clusters[clusterID]; c != nil {
+		if a, ok := c.auth[key]; ok {
+			a.Seq = seq
+			c.auth[key] = a
+			l.saveFailover()
+		}
+	}
 }
 
 func replicaMembers(placement []lease.Entry, kind, id string) []string {
@@ -383,13 +424,14 @@ func (l *Leader) wait(clusterID string, e lease.Entry, from, reason string) {
 		}
 	}
 	key := entryKey(e.Kind, e.ID, e.Replica)
-	c.auth[key] = authority{At: l.cfg.Now(), Entry: e}
+	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, From: from, Reason: reason}
 	c.waiting[key] = &Waiting{Kind: e.Kind, ID: e.ID, Replica: e.Replica, From: from, Reason: reason, Slug: e.Slug, NextTry: l.cfg.Now().Add(RetryEvery)}
 	members := replicaMembers(c.placement, e.Kind, e.ID)
 	epoch := c.epoch
 	l.saveFailover()
 	l.mu.Unlock()
-	l.log.Append("placement", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "members": members, "epoch": epoch})
+	ev := l.log.Append("placement", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "members": members, "epoch": epoch})
+	l.stamp(clusterID, key, ev.Seq)
 }
 
 type failoverJob struct {

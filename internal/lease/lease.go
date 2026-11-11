@@ -89,6 +89,19 @@ type Start struct {
 	Env           map[string]string `json:"env"`
 	RegistryAuth  []RegistryAuth    `json:"registryAuth"`
 	ComposeUpArgs []string          `json:"composeUpArgs"`
+	// Ready and RestartRule are the deploy's own messages as JSON, so the moved App is checked and watched as before.
+	Ready       json.RawMessage `json:"ready,omitempty"`
+	RestartRule json.RawMessage `json:"restartRule,omitempty"`
+	// StartAfterReady names the services the member starts only once the rest is ready.
+	StartAfterReady  []string    `json:"startAfterReady,omitempty"`
+	Mounts           []MountFile `json:"mounts,omitempty"`
+	FilesBindSources []string    `json:"filesBindSources,omitempty"`
+}
+
+// MountFile is a file the deploy writes beside the stack.
+type MountFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 // StaleEpoch is the reply Error of a member that has seen a newer leader.

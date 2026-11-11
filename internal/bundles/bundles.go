@@ -48,6 +48,18 @@ type Stack struct {
 	RegistryAuth  []RegistryAuth    `json:"registryAuth"`
 	ComposeUpArgs []string          `json:"composeUpArgs"`
 	TunnelToken   string            `json:"tunnelToken,omitempty"`
+	// Ready and RestartRule are the deploy's own messages as JSON; the leader passes them on unread.
+	Ready            json.RawMessage `json:"ready,omitempty"`
+	RestartRule      json.RawMessage `json:"restartRule,omitempty"`
+	StartAfterReady  []string        `json:"startAfterReady,omitempty"`
+	Mounts           []MountFile     `json:"mounts,omitempty"`
+	FilesBindSources []string        `json:"filesBindSources,omitempty"`
+}
+
+// MountFile is a file the deploy writes beside the stack.
+type MountFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 // Bundle is the opened plaintext. It lives in memory only as long as one restart needs it.
