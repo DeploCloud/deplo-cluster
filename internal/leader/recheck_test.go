@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -217,5 +220,29 @@ func TestAnAppFollowsItsEnvironmentsDatabaseWithinOnePass(t *testing.T) {
 	f.pass(90 * time.Second)
 	if placed(f, "db_1") != "srv_b" || placed(f, "prj_1") != "srv_b" {
 		t.Fatalf("database on %q, its App on %q", placed(f, "db_1"), placed(f, "prj_1"))
+	}
+}
+
+// An epoch file that will not open says nothing about who led last. The leader then serves no cluster from what
+// it kept: it waits for Deplo's roster, which carries the epoch, and says why.
+func TestAnEpochFileThatCannotBeReadKeepsTheLeaderFromLeadingOnItsOwn(t *testing.T) {
+	dir := t.TempDir()
+	l, _, ms := start(t, dir)
+	if err := l.SetRoster(roster(4, "srv_a", "srv_b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "epochs.json"), []byte(`{"clu_1":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	again := leader.New(leader.Config{Dial: ms.dial, StateDir: dir, Logf: func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }})
+	if n := len(again.Snapshot().Clusters); n != 0 {
+		t.Fatalf("the leader serves %d clusters from a state it could not read", n)
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), "epochs.json") {
+		t.Fatalf("nothing said why: %v", logged)
+	}
+	if err := again.SetRoster(roster(4, "srv_a", "srv_b")); err != nil {
+		t.Fatalf("Deplo's roster was refused: %v", err)
 	}
 }

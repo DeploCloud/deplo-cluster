@@ -16,6 +16,8 @@ import (
 	"sync"
 
 	"filippo.io/age"
+
+	"github.com/DeploCloud/deplo-cluster/internal/statefile"
 )
 
 // Meta is what the leader needs to place a workload without the control plane; it holds no secret.
@@ -202,11 +204,7 @@ func write(file string, raw []byte) error {
 	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 		return err
 	}
-	tmp := file + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, file)
+	return statefile.Write(file, raw)
 }
 
 // Put stores a sealed bundle in place of the workload's earlier one. A blob this leader cannot open is refused,

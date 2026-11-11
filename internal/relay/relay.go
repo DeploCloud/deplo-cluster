@@ -19,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
 
+	"github.com/DeploCloud/deplo-cluster/internal/statefile"
 	"github.com/DeploCloud/deplo-cluster/internal/wire"
 )
 
@@ -163,14 +164,12 @@ func (r *Relay) save() {
 		}
 	}
 	raw, _ := json.Marshal(st)
-	tmp := r.cfg.StateFile + ".tmp"
-	if err := os.MkdirAll(filepath.Dir(r.cfg.StateFile), 0o700); err == nil {
-		if err = os.WriteFile(tmp, raw, 0o600); err == nil {
-			err = os.Rename(tmp, r.cfg.StateFile)
-		}
-		if err != nil {
-			r.cfg.Logf("deplo-cluster relay: keep the roster: %v", err)
-		}
+	err := os.MkdirAll(filepath.Dir(r.cfg.StateFile), 0o700)
+	if err == nil {
+		err = statefile.Write(r.cfg.StateFile, raw)
+	}
+	if err != nil {
+		r.cfg.Logf("deplo-cluster relay: keep the roster: %v", err)
 	}
 }
 

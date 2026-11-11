@@ -99,8 +99,14 @@ func (l *Leader) newCluster(id string) *cluster {
 
 func (l *Leader) loadFailover() {
 	l.restored = map[string]persisted{}
-	if raw, err := os.ReadFile(filepath.Join(l.cfg.StateDir, "failover.json")); err == nil {
-		_ = json.Unmarshal(raw, &l.restored)
+	raw, err := os.ReadFile(filepath.Join(l.cfg.StateDir, "failover.json"))
+	if err == nil {
+		err = json.Unmarshal(raw, &l.restored)
+	}
+	// Safe to go on without: a member not heard since this start is presumed to hold the longest lease.
+	if err != nil && !os.IsNotExist(err) {
+		l.restored = map[string]persisted{}
+		l.cfg.Logf("deplo-cluster: failover.json cannot be read (%v): what this leader had moved or left waiting is forgotten", err)
 	}
 }
 
@@ -116,11 +122,7 @@ func (l *Leader) saveFailover() {
 	for id, c := range l.clusters {
 		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended, Returning: c.returning, Left: c.left, Kept: c.kept}
 	}
-	raw, _ := json.Marshal(out)
-	tmp := filepath.Join(l.cfg.StateDir, "failover.json.tmp")
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, filepath.Join(l.cfg.StateDir, "failover.json"))
-	}
+	l.keep("failover.json", out)
 }
 
 // reconcilePlacement is the roster's placement with the leader's own moves laid over it. A move stands until the
@@ -162,7 +164,13 @@ func (l *Leader) adoptWaiting(c *cluster, now time.Time) {
 func (l *Leader) loadRosters() {
 	var saved map[string]Roster
 	raw, err := os.ReadFile(filepath.Join(l.cfg.StateDir, "rosters.json"))
-	if err != nil || json.Unmarshal(raw, &saved) != nil {
+	if err == nil {
+		err = json.Unmarshal(raw, &saved)
+	}
+	if err != nil {
+		if !os.IsNotExist(err) {
+			l.cfg.Logf("deplo-cluster: rosters.json cannot be read (%v): serving no cluster until Deplo sends its roster", err)
+		}
 		return
 	}
 	for _, r := range saved {
@@ -182,11 +190,7 @@ func (l *Leader) saveRosters() {
 	for id, c := range l.clusters {
 		out[id] = c.roster
 	}
-	raw, _ := json.Marshal(out)
-	tmp := filepath.Join(l.cfg.StateDir, "rosters.json.tmp")
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, filepath.Join(l.cfg.StateDir, "rosters.json"))
-	}
+	l.keep("rosters.json", out)
 }
 
 // memberFacts is every member as the placement rule sees it; the caller holds l.mu.

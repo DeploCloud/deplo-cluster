@@ -16,6 +16,7 @@ import (
 	"github.com/DeploCloud/deplo-cluster/internal/bundles"
 	"github.com/DeploCloud/deplo-cluster/internal/events"
 	"github.com/DeploCloud/deplo-cluster/internal/lease"
+	"github.com/DeploCloud/deplo-cluster/internal/statefile"
 	"github.com/DeploCloud/deplo-cluster/internal/wire"
 )
 
@@ -167,28 +168,40 @@ func New(cfg Config) *Leader {
 	}
 	l := &Leader{cfg: cfg, log: events.Open(file, MaxEvents, cfg.Now), clusters: map[string]*cluster{}, epochs: map[string]uint64{}}
 	if cfg.StateDir != "" {
-		if raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "epochs.json")); err == nil {
-			_ = json.Unmarshal(raw, &l.epochs)
+		raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "epochs.json"))
+		if err == nil {
+			err = json.Unmarshal(raw, &l.epochs)
 		}
 		l.loadFailover()
+		// Without the epochs it held, this leader cannot tell an old roster from the current one: it waits for Deplo's.
+		if err != nil && !os.IsNotExist(err) {
+			l.epochs = map[string]uint64{}
+			cfg.Logf("deplo-cluster: epochs.json cannot be read (%v): serving no cluster until Deplo sends its roster", err)
+			return l
+		}
 		l.loadRosters()
 	}
 	return l
 }
 
-// Events is the buffer a watcher reads.
-func (l *Leader) Events() *events.Log { return l.log }
-
-func (l *Leader) saveEpochs() {
+// keep writes one state file whole; a failure is logged, since the state in memory is still right.
+func (l *Leader) keep(name string, v any) {
 	if l.cfg.StateDir == "" {
 		return
 	}
-	raw, _ := json.Marshal(l.epochs)
-	tmp := filepath.Join(l.cfg.StateDir, "epochs.json.tmp")
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, filepath.Join(l.cfg.StateDir, "epochs.json"))
+	raw, err := json.Marshal(v)
+	if err == nil {
+		err = statefile.Write(filepath.Join(l.cfg.StateDir, name), raw)
+	}
+	if err != nil {
+		l.cfg.Logf("deplo-cluster: could not keep %s: %v", name, err)
 	}
 }
+
+// Events is the buffer a watcher reads.
+func (l *Leader) Events() *events.Log { return l.log }
+
+func (l *Leader) saveEpochs() { l.keep("epochs.json", l.epochs) }
 
 // Roster is the control plane's picture of one cluster: its epoch, its members and where it put each workload.
 type Roster struct {
