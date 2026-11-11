@@ -370,6 +370,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		fp := target.Fingerprint
 		l.mu.Unlock()
 
+		began := time.Now()
 		if err := l.sendStart(ctx, fp, order); err != nil {
 			l.cfg.Logf("deplo-cluster: %s could not start %s: %v", ans.Member, b.Stack.Slug, err)
 			exclude[ans.Member] = true
@@ -380,7 +381,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		entry.Kind, entry.ID, entry.Replica = kind, id, replica
 		entry.Member = ans.Member
-		l.commit(clusterID, entry, placement.Needed(w), from, b.Restore)
+		l.commit(clusterID, entry, placement.Needed(w), from, b.Restore, time.Since(began))
 		return outcome{member: ans.Member}
 	}
 	return outcome{refusal: &placement.Refusal{Reason: "start_failed", NeededMB: placement.Needed(placement.Workload{LimitMB: meta.LimitMB, PeakMB: meta.PeakMB}), Cluster: clusterID, Workload: id}}
@@ -392,7 +393,7 @@ func canRestore(r *bundles.Restore, m *member) bool {
 }
 
 // commit records where a workload now runs, takes its memory off that member and tells the control plane.
-func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string, restored *bundles.Restore) {
+func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string, restored *bundles.Restore, took time.Duration) {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil {
@@ -418,6 +419,9 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 	if restored != nil {
 		a.BackupID, a.BackupAt = restored.BackupID, restored.TakenAt
 		moved["backupId"], moved["backupAt"] = restored.BackupID, restored.TakenAt
+		// The whole recovery, start and restore: what the control plane's next estimate is measured from.
+		a.RestoreMs = max(took.Milliseconds(), 1)
+		moved["restoreMs"] = a.RestoreMs
 	}
 	c.auth[key] = a
 	delete(c.waiting, key)
