@@ -587,7 +587,7 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 		m.FreeMB -= needMB
 	}
 	key := entryKey(e.Kind, e.ID, e.Replica)
-	a := authority{At: l.cfg.Now(), Entry: e, From: from, Reason: StoppedAnswering}
+	a := authority{At: l.cfg.Now(), Entry: e, Told: Told{From: from, Reason: StoppedAnswering}}
 	moved := map[string]any{"kind": e.Kind, "workloadId": e.ID, "from": from, "to": e.Member, "reason": StoppedAnswering}
 	if restored != nil {
 		a.BackupID, a.BackupAt = restored.BackupID, restored.TakenAt
@@ -651,7 +651,7 @@ func (l *Leader) wait(clusterID string, e lease.Entry, from, reason, why string)
 	e.Member = ""
 	c.place(e.Kind, e.ID, e.Replica, "")
 	key := entryKey(e.Kind, e.ID, e.Replica)
-	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, From: from, Reason: reason, Wait: why}
+	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, Told: Told{From: from, Reason: reason, Wait: why}}
 	c.waiting[key] = &Waiting{Kind: e.Kind, ID: e.ID, Replica: e.Replica, From: from, Reason: reason, Slug: e.Slug, NextTry: l.cfg.Now().Add(RetryEvery)}
 	members := replicaMembers(c.placement, e.Kind, e.ID)
 	epoch := c.epoch

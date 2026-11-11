@@ -67,7 +67,7 @@ func (l *Leader) follow(clusterID string, e lease.Entry, from string) {
 		c.placement = append(c.placement, e)
 	}
 	key := entryKey(e.Kind, e.ID, e.Replica)
-	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, From: from, Reason: StoppedAnswering}
+	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, Told: Told{From: from, Reason: StoppedAnswering}}
 	delete(c.waiting, key)
 	members, epoch := replicaMembers(c.placement, e.Kind, e.ID), c.epoch
 	l.saveFailover()

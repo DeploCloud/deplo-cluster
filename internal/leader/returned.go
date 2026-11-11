@@ -72,7 +72,7 @@ func (l *Leader) giveBack(c *cluster, memberID string, its func(*Waiting) bool) 
 			continue
 		}
 		if p, ok := c.place(w.Kind, w.ID, w.Replica, memberID); ok {
-			c.auth[key] = authority{At: l.cfg.Now(), Entry: p, Reason: Returned}
+			c.auth[key] = authority{At: l.cfg.Now(), Entry: p, Told: Told{Reason: Returned}}
 			back = append(back, p)
 		}
 		delete(c.waiting, key)

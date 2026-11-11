@@ -123,10 +123,15 @@ func (c *cluster) leads(now time.Time) bool {
 type authority struct {
 	At    time.Time   `json:"at"`
 	Entry lease.Entry `json:"entry"`
-	// From and Reason say what happened; Seq is the event that told the control plane, for one that missed it.
-	From   string `json:"from,omitempty"`
-	Reason string `json:"reason,omitempty"`
-	Seq    uint64 `json:"seq,omitempty"`
+	Told
+}
+
+// Told is what happened to a replica the leader moved or left waiting, as the snapshot and the kept state hold it.
+type Told struct {
+	From   string `json:"from"`
+	Reason string `json:"reason"`
+	// Seq is the event that told the control plane, for one that missed it.
+	Seq uint64 `json:"seq"`
 	// Wait is why a waiting replica found no member (the placement's refusal).
 	Wait string `json:"wait,omitempty"`
 	// BackupID and BackupAt name the backup a moved workload was restored from; RestoreMs is how long that took.
@@ -629,17 +634,7 @@ type ClusterView struct {
 // Move is one replica the leader moved or left waiting (Member empty), and why.
 type Move struct {
 	lease.Entry
-	From   string `json:"from"`
-	Reason string `json:"reason"`
-	Seq    uint64 `json:"seq"`
-	// Wait is why a waiting replica found no member, as the failover event's own reason.
-	Wait string `json:"wait,omitempty"`
-	// BackupID and BackupAt name the backup the workload was restored from, when it was; RestoreMs is how long that took.
-	BackupID  string `json:"backupId,omitempty"`
-	BackupAt  string `json:"backupAt,omitempty"`
-	RestoreMs int64  `json:"restoreMs,omitempty"`
-	// Promoted says the workload's standby copy was promoted instead.
-	Promoted bool `json:"promoted,omitempty"`
+	Told
 }
 
 // Snapshot is the whole truth now, for the control plane to reconcile against after a replay.
@@ -661,7 +656,7 @@ func (l *Leader) Snapshot() Snapshot {
 		sort.Slice(v.Members, func(i, j int) bool { return v.Members[i].ID < v.Members[j].ID })
 		v.Moves = []Move{}
 		for _, a := range c.auth {
-			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq, Wait: a.Wait, BackupID: a.BackupID, BackupAt: a.BackupAt, RestoreMs: a.RestoreMs, Promoted: a.Promoted})
+			v.Moves = append(v.Moves, Move{Entry: a.Entry, Told: a.Told})
 		}
 		sort.Slice(v.Moves, func(i, j int) bool {
 			a, b := v.Moves[i], v.Moves[j]
