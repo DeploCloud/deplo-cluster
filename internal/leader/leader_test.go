@@ -45,6 +45,8 @@ type members struct {
 	startLeft map[string]time.Duration
 	// returned is what a member that came back says it removed, once the leader asks.
 	returned map[string]*lease.Returned
+	// slow is how long a member's plain renewal takes to reach it.
+	slow map[string]time.Duration
 }
 
 func newMembers() *members {
@@ -70,6 +72,12 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 		}
 		var o lease.Order
 		_ = json.Unmarshal(line, &o)
+		m.mu.Lock()
+		wait := m.slow[to.Fingerprint]
+		m.mu.Unlock()
+		if o.ExtendSeconds == 0 {
+			time.Sleep(wait)
+		}
 		m.mu.Lock()
 		held := m.epoch[to.Fingerprint]
 		r := lease.Reply{OK: true}
