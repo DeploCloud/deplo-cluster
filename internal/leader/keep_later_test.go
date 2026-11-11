@@ -184,3 +184,26 @@ func TestKeptDataOfAWorkloadThatWentBackToItsMemberIsAskedAboutWithoutADestinati
 		t.Fatalf("keep %+v, want the stack named and nowhere to save a volume that is live again", k)
 	}
 }
+
+// A leader that is not sure it leads only asks (spec #176): what a member kept is handed no destination by it.
+func TestALeaderThatIsNotSureHandsNoDestination(t *testing.T) {
+	f := keptBack(t)
+	f.pass(10 * time.Second)
+	if k := f.lastOrder("fp-srv_a").Keep; len(k) != 1 {
+		t.Fatalf("keep %+v while the leader leads", k)
+	}
+	f.away = true
+	f.ms.cut["fp-srv_b"] = true
+	f.pass(5 * time.Minute)
+	f.ms.mu.Lock()
+	probes := f.ms.probes["fp-srv_a"]
+	f.ms.mu.Unlock()
+	if len(probes) == 0 {
+		t.Fatal("the leader never asked srv_a whether it still leads")
+	}
+	for _, o := range probes {
+		if len(o.Keep)+len(o.Stores) > 0 {
+			t.Fatalf("a probe carries keep %+v, stores %+v", o.Keep, o.Stores)
+		}
+	}
+}
