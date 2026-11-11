@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -83,9 +84,10 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 	defer stopParty()
 	if dial {
 		p = party.New(party.Config{
-			Role:     wire.RoleLeader,
-			Identity: identity,
-			Relays:   func() []string { return readLines(relays) },
+			Role:      wire.RoleLeader,
+			Identity:  identity,
+			Transport: relayTransport,
+			Relays:    func() []string { return readLines(relays) },
 			// Members never open a stream to the leader; only the leader sends orders.
 			Accept: func(_ wire.Party, c net.Conn) { c.Close() },
 			Logf:   logger.Printf,
@@ -133,6 +135,16 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 }
 
 // listenPrivate opens a unix socket only its owner can use, from the moment it exists.
+// relayTransport reaches a relay through proxies nobody here trusts: the mutual TLS inside proves both ends (ADR-0040).
+func relayTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout: 10 * time.Second,
+		DisableKeepAlives:   true,
+	}
+}
+
 func listenPrivate(socket string) (net.Listener, error) {
 	_ = os.Remove(socket)
 	old := syscall.Umask(0o177)
