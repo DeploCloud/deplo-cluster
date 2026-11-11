@@ -264,14 +264,19 @@ func (l *Leader) startOrder(b bundles.Bundle) *lease.Start {
 
 // sendStart gives one member the order to bring a workload up and waits for it to answer.
 func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error {
-	ctx, cancel := context.WithTimeout(ctx, lease.StartTimeout)
+	// ponytail: one start at a time, so a long restore holds the Apps behind it; run restores beside them if that hurts.
+	limit := lease.StartTimeout
+	if o.Start.Restore != nil {
+		limit = lease.RestoreTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: fp, Role: wire.RoleMember})
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(lease.StartTimeout))
+	_ = c.SetDeadline(time.Now().Add(limit))
 	r, err := lease.Send(c, o)
 	switch {
 	case err != nil:

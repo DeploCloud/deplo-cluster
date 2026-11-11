@@ -20,6 +20,8 @@ const (
 	MaxLine = 16 << 20
 	// StartTimeout is how long a member may take to bring a moved workload up.
 	StartTimeout = 5 * time.Minute
+	// RestoreTimeout is how long a start that restores a backup first may take.
+	RestoreTimeout = StartTimeout + 30*time.Minute
 	// ExtendFor is how long a planned restart of the leader buys every member.
 	ExtendFor = 5 * time.Minute
 )

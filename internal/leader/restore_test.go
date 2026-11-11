@@ -12,6 +12,7 @@ import (
 
 	"github.com/DeploCloud/deplo-cluster/internal/bundles"
 	"github.com/DeploCloud/deplo-cluster/internal/leader"
+	"github.com/DeploCloud/deplo-cluster/internal/lease"
 )
 
 const restoreRequest = `{"kind":"BACKUP_KIND_DATABASE","s3":{"bucket":"backups","secretKey":"s3cr3t","objectKey":"t/db_1/brun_1.dump.gz"}}`
@@ -178,5 +179,15 @@ func TestAnExtensionEndsWithTheMembersNextRenewal(t *testing.T) {
 	f.pass(85 * time.Second)
 	if placed(f, "db_1") != "srv_b" {
 		t.Fatalf("a renewed member kept its extension: database on %q", placed(f, "db_1"))
+	}
+}
+
+func TestAStartThatRestoresABackupIsGivenLongerThanAPlainStart(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64")})
+	f.putDB(t, "db_1", "db-main", backup(""))
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(85 * time.Second)
+	if left := f.ms.startLeft["fp-srv_b"]; left <= lease.StartTimeout || left > lease.RestoreTimeout {
+		t.Fatalf("the restore was given %s, want more than %s and at most %s", left, lease.StartTimeout, lease.RestoreTimeout)
 	}
 }
