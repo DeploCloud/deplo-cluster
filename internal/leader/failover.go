@@ -42,16 +42,20 @@ type Waiting struct {
 func entryKey(kind, id string, replica int) string { return fmt.Sprintf("%s/%s/%d", kind, id, replica) }
 
 type persisted struct {
-	Waiting  map[string]*Waiting  `json:"waiting"`
-	Auth     map[string]authority `json:"auth"`
-	Extended map[string]time.Time `json:"extended,omitempty"`
+	Waiting   map[string]*Waiting  `json:"waiting"`
+	Auth      map[string]authority `json:"auth"`
+	Extended  map[string]time.Time `json:"extended,omitempty"`
+	Returning map[string]bool      `json:"returning,omitempty"`
 }
 
 func (l *Leader) newCluster(id string) *cluster {
-	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}}
+	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}}
 	if p, ok := l.restored[id]; ok {
 		if p.Extended != nil {
 			c.extended = p.Extended
+		}
+		if p.Returning != nil {
+			c.returning = p.Returning
 		}
 		if p.Waiting != nil {
 			c.waiting = p.Waiting
@@ -81,7 +85,7 @@ func (l *Leader) saveFailover() {
 		out[id] = p
 	}
 	for id, c := range l.clusters {
-		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended}
+		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended, Returning: c.returning}
 	}
 	raw, _ := json.Marshal(out)
 	tmp := filepath.Join(l.cfg.StateDir, "failover.json.tmp")
@@ -347,7 +351,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		if !moved {
 			next = append(next, lease.Entry{Kind: kind, ID: id, Replica: replica, Member: ans.Member, Slug: b.Stack.Slug})
 		}
-		order := lease.Order{Cluster: clusterID, Member: ans.Member, Epoch: c.epoch, Placement: next, Start: l.startOrder(b)}
+		order := lease.Order{Cluster: clusterID, Member: ans.Member, Epoch: c.epoch, Placement: next, Start: l.startOrder(b), Return: c.returning[ans.Member]}
 		fp := target.Fingerprint
 		l.mu.Unlock()
 
@@ -629,7 +633,7 @@ func (l *Leader) Drain(ctx context.Context) {
 		}
 		for _, m := range c.members {
 			c.extended[m.ID] = until
-			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: append([]lease.Entry(nil), c.placement...), ExtendSeconds: int(lease.ExtendFor / time.Second)}})
+			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: append([]lease.Entry(nil), c.placement...), ExtendSeconds: int(lease.ExtendFor / time.Second), Return: c.returning[m.ID]}})
 		}
 	}
 	l.saveFailover()

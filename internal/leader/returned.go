@@ -1,0 +1,86 @@
+package leader
+
+import (
+	"sort"
+
+	"github.com/DeploCloud/deplo-cluster/internal/lease"
+)
+
+// Returned is the reason a workload that found no room went back to the member that came back with it.
+const Returned = "returned"
+
+// Stopped is one workload whose copy a returning member removed, because it runs elsewhere now.
+type Stopped struct {
+	Kind string `json:"kind"`
+	ID   string `json:"workloadId"`
+}
+
+// cameBack handles a member answering again after its work was dealt with: what found no room goes back to
+// it, and once it reports what it removed, one event says so. The caller holds l.mu and runs the result after.
+func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) func() {
+	c := l.clusters[clusterID]
+	if c == nil || (!c.moved[memberID] && !c.returning[memberID]) {
+		return func() {}
+	}
+	var back []lease.Entry
+	if c.moved[memberID] {
+		delete(c.moved, memberID)
+		c.returning[memberID] = true
+		for key, w := range c.waiting {
+			if w.From != memberID {
+				continue
+			}
+			for i := range c.placement {
+				p := &c.placement[i]
+				if p.Kind == w.Kind && p.ID == w.ID && p.Replica == w.Replica {
+					p.Member = memberID
+					c.auth[key] = authority{At: l.cfg.Now(), Entry: *p, Reason: Returned}
+					back = append(back, *p)
+				}
+			}
+			delete(c.waiting, key)
+		}
+		sort.Slice(back, func(i, j int) bool {
+			return entryKey(back[i].Kind, back[i].ID, back[i].Replica) < entryKey(back[j].Kind, back[j].ID, back[j].Replica)
+		})
+	}
+	type placed struct {
+		kind, id string
+		members  []string
+	}
+	var told []placed
+	for _, e := range back {
+		told = append(told, placed{e.Kind, e.ID, replicaMembers(c.placement, e.Kind, e.ID)})
+	}
+	var stopped []Stopped
+	if report != nil {
+		delete(c.returning, memberID)
+		stopped = []Stopped{}
+		for _, slug := range report.Removed {
+			for _, e := range c.placement {
+				if e.Slug == slug && e.Slug != "" && !containsStopped(stopped, e.Kind, e.ID) {
+					stopped = append(stopped, Stopped{e.Kind, e.ID})
+				}
+			}
+		}
+	}
+	epoch := c.epoch
+	l.saveFailover()
+	return func() {
+		for _, p := range told {
+			l.log.Append("placement", clusterID, map[string]any{"kind": p.kind, "workloadId": p.id, "members": p.members, "epoch": epoch})
+		}
+		if stopped != nil {
+			l.log.Append("member_returned", clusterID, map[string]any{"member": memberID, "stopped": stopped})
+		}
+	}
+}
+
+func containsStopped(all []Stopped, kind, id string) bool {
+	for _, s := range all {
+		if s.Kind == kind && s.ID == id {
+			return true
+		}
+	}
+	return false
+}

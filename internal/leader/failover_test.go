@@ -21,6 +21,7 @@ type fo struct {
 	ms     *members
 	store  *bundles.Store
 	pathOK bool
+	dir    string
 }
 
 func startFO(t *testing.T, mem map[string]leader.Member) *fo {
@@ -32,7 +33,8 @@ func startFO(t *testing.T, mem map[string]leader.Member) *fo {
 	if f.store, err = bundles.Open(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	f.l = leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: t.TempDir(), Bundles: f.store, PathOK: func() bool { return f.pathOK }})
+	f.dir = t.TempDir()
+	f.l = leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }})
 	r := leader.Roster{Cluster: "clu_1", Epoch: 1}
 	for _, id := range []string{"srv_a", "srv_b", "srv_c"} {
 		if m, ok := mem[id]; ok {

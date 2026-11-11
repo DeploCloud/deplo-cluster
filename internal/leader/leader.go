@@ -72,6 +72,8 @@ type cluster struct {
 	superseded bool
 	// moved marks a silent member whose workloads were already dealt with, until it answers again.
 	moved map[string]bool
+	// returning marks a member that came back from that, until it has said what it removed.
+	returning map[string]bool
 	// waiting is what found no room, retried every RetryEvery; auth is where the leader put a workload until
 	// the control plane's picture agrees, so a roster that has not seen the move yet cannot undo it.
 	waiting map[string]*Waiting
@@ -255,7 +257,7 @@ func (l *Leader) Tick(ctx context.Context) {
 			continue
 		}
 		for _, m := range c.members {
-			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: append([]lease.Entry(nil), c.placement...)}})
+			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: append([]lease.Entry(nil), c.placement...), Return: c.returning[m.ID]}})
 		}
 	}
 	l.mu.Unlock()
@@ -307,7 +309,9 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 			delete(cl.extended, m.ID)
 			l.saveFailover()
 		}
+		tell := l.cameBack(clusterID, m.ID, r.Returned)
 		l.mu.Unlock()
+		tell()
 	}
 }
 

@@ -71,6 +71,13 @@ type Order struct {
 	ExtendSeconds int `json:"extendSeconds,omitempty"`
 	// Start asks the member to bring one moved workload up from its failover bundle.
 	Start *Start `json:"start,omitempty"`
+	// Return asks a member that was presumed dead what it removed; sent until it answers with Returned.
+	Return bool `json:"return,omitempty"`
+}
+
+// Returned is the stacks a member that came back stopped and removed, because they run elsewhere now.
+type Returned struct {
+	Removed []string `json:"removed"`
 }
 
 // RegistryAuth is a registry login a pulled image needs.
@@ -127,6 +134,8 @@ type Reply struct {
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
 	Epoch    uint64 `json:"epoch,omitempty"`
+	// Returned answers an order's Return once the member is done removing what moved away.
+	Returned *Returned `json:"returned,omitempty"`
 }
 
 // ErrStale is a member refusing an older epoch.
