@@ -415,3 +415,28 @@ func TestAForgedForwardedAddressSpendsNobodyElsesBudget(t *testing.T) {
 		t.Fatal("the member behind the proxy was locked out by a container that wrote its address")
 	}
 }
+
+// A party's streams each cost the relay a goroutine and a buffer: one party cannot open them without end.
+func TestOnePartyCannotHoldMoreStreamsThanTheCap(t *testing.T) {
+	was := relay.MaxStreams
+	relay.MaxStreams = 2
+	t.Cleanup(func() { relay.MaxStreams = was })
+	f := newFixture(t, relay.Limit{})
+	a, b := f.ca.Leaf(t, "a"), f.ca.Leaf(t, "b")
+	ma, mb := f.join(a, wire.RoleMember), f.join(b, wire.RoleLeader)
+	f.relay.SetRoster("clu_1", []wire.Party{ma.wire, mb.wire})
+	f.waitConnected(ma, 1)
+	f.waitConnected(mb, 1)
+	f.waitRelayHolds(2)
+	for i := 0; i < 2; i++ {
+		c, err := ma.party.Dial(f.ctx, mb.wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+	}
+	if c, err := ma.party.Dial(f.ctx, mb.wire); err == nil {
+		c.Close()
+		t.Fatal("a third stream was carried past a cap of two")
+	}
+}

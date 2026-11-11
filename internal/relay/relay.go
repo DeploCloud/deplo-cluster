@@ -198,6 +198,10 @@ func (r *Relay) load() {
 	}
 }
 
+// MaxStreams is how many streams one party may hold open at a time; one more is closed unanswered.
+// ponytail: every connection an App holds to a database on another member is one, so the cap is generous.
+var MaxStreams = 4096
+
 var yamuxConfig = func() *yamux.Config {
 	c := yamux.DefaultConfig()
 	c.LogOutput = io.Discard
@@ -258,12 +262,21 @@ func (r *Relay) hold(req *http.Request, ws *websocket.Conn) {
 		return
 	}
 	defer r.unregister(s)
+	slots := make(chan struct{}, MaxStreams)
 	for {
 		st, err := mux.AcceptStream()
 		if err != nil {
 			return
 		}
-		go r.handleStream(s, st)
+		select {
+		case slots <- struct{}{}:
+			go func() {
+				defer func() { <-slots }()
+				r.handleStream(s, st)
+			}()
+		default:
+			st.Close()
+		}
 	}
 }
 
