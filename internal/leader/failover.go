@@ -540,7 +540,7 @@ type retryJob struct {
 func (l *Leader) Failover(ctx context.Context) {
 	l.foMu.Lock()
 	defer l.foMu.Unlock()
-	if l.cfg.Bundles == nil || (l.cfg.PathOK != nil && !l.cfg.PathOK()) {
+	if ctx.Err() != nil || l.cfg.Bundles == nil || (l.cfg.PathOK != nil && !l.cfg.PathOK()) {
 		return
 	}
 	now := l.cfg.Now()
@@ -685,6 +685,8 @@ func (l *Leader) Drain(ctx context.Context) {
 		order   lease.Order
 	}
 	var jobs []job
+	l.tickMu.Lock()
+	defer l.tickMu.Unlock()
 	l.mu.Lock()
 	// Kept before the order leaves: a member that took it and whose answer was lost is extended all the same.
 	until := l.cfg.Now().Add(lease.FenceAfter + lease.ExtendFor)

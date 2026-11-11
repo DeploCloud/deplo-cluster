@@ -47,6 +47,8 @@ type members struct {
 	returned map[string]*lease.Returned
 	// restoreTakes is how long a member takes over a start order that restores a backup.
 	restoreTakes time.Duration
+	// slow is how long a member's plain renewal takes to reach it.
+	slow map[string]time.Duration
 }
 
 func newMembers() *members {
@@ -72,6 +74,12 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 		}
 		var o lease.Order
 		_ = json.Unmarshal(line, &o)
+		m.mu.Lock()
+		wait := m.slow[to.Fingerprint]
+		m.mu.Unlock()
+		if o.ExtendSeconds == 0 {
+			time.Sleep(wait)
+		}
 		m.mu.Lock()
 		held := m.epoch[to.Fingerprint]
 		r := lease.Reply{OK: true}

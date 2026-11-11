@@ -106,6 +106,8 @@ type Leader struct {
 	epochs   map[string]uint64
 	// foMu lets one failover pass run at a time; renewals never wait on it.
 	foMu sync.Mutex
+	// tickMu keeps a drain behind the renewals already on their way, so its longer lease is what a member hears last.
+	tickMu sync.Mutex
 	// restored is the failover state read at start, handed to each cluster when its roster first arrives.
 	restored map[string]persisted
 	// pending is the moves a person asked for, made by the next failover pass.
@@ -180,7 +182,8 @@ func (l *Leader) SetRoster(r Roster) error {
 		l.clusters[r.Cluster] = c
 	}
 	// A newer epoch means another leader led in between: this one heard nobody meanwhile, and what it moved
-	// before is that leader's to have changed. Every lease starts over and its own moves are dropped.
+	// before is that leader's to have changed. Every lease starts over and its own moves are dropped. A lease it
+	// extended and a return it is still owed stay: who leads changes neither.
 	again := c.epoch != 0 && r.Epoch > c.epoch
 	if again {
 		c.auth, c.waiting, c.moved = map[string]authority{}, map[string]*Waiting{}, map[string]bool{}
@@ -287,6 +290,12 @@ func (l *Leader) Tick(ctx context.Context) {
 		order   lease.Order
 	}
 	var jobs []job
+	l.tickMu.Lock()
+	defer l.tickMu.Unlock()
+	// Told to stop: the drain's longer lease is the last order, and a dial does not look at a cancelled context.
+	if ctx.Err() != nil {
+		return
+	}
 	l.mu.Lock()
 	for id, c := range l.clusters {
 		if c.superseded {
