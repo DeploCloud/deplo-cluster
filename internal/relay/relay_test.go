@@ -392,3 +392,26 @@ func TestValidateListenRefusesWhatOutsidersCouldReach(t *testing.T) {
 		}
 	}
 }
+
+// The door also answers on the Docker bridge, where any container of the host reaches it without the proxy.
+// One that writes a member's address in X-Forwarded-For spends its own budget, never that member's.
+func TestAForgedForwardedAddressSpendsNobodyElsesBudget(t *testing.T) {
+	f := newFixture(t, relay.Limit{Max: 2, Window: time.Minute})
+	knock := func(peer string) int {
+		req := httptest.NewRequest(http.MethodGet, wire.Path, nil)
+		req.RemoteAddr = peer
+		req.Header.Set("X-Forwarded-For", "203.0.113.9")
+		rec := httptest.NewRecorder()
+		f.relay.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for i := 0; i < 5; i++ {
+		knock("172.18.0.66:40000")
+	}
+	if got := knock("172.18.0.66:40001"); got != http.StatusTooManyRequests {
+		t.Fatalf("the forger itself was answered %d", got)
+	}
+	if got := knock("172.18.0.2:50000"); got == http.StatusTooManyRequests {
+		t.Fatal("the member behind the proxy was locked out by a container that wrote its address")
+	}
+}

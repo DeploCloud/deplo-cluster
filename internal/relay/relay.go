@@ -363,19 +363,21 @@ func cut(s *yamux.Stream) {
 	_ = s.Close()
 }
 
-// clientAddress is the last X-Forwarded-For hop, the one the proxy in front appended, else the peer.
+// clientAddress is who a connection attempt is counted against: the peer, and with it the last X-Forwarded-For
+// hop when there is one. The hop alone would let anyone who reaches the door directly (a container on this host)
+// write a member's address and spend its budget; the peer cannot be forged.
 func clientAddress(req *http.Request) string {
+	peer, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		peer = req.RemoteAddr
+	}
 	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
 		if hop := strings.TrimSpace(parts[len(parts)-1]); hop != "" {
-			return hop
+			return peer + "|" + hop
 		}
 	}
-	host, _, err := net.SplitHostPort(req.RemoteAddr)
-	if err != nil {
-		return req.RemoteAddr
-	}
-	return host
+	return peer
 }
 
 type limiter struct {
