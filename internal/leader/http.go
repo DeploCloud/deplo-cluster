@@ -31,6 +31,19 @@ func (l *Leader) Handler() http.Handler {
 		}
 		reply(w, map[string]bool{"ok": true})
 	})
+	mux.HandleFunc("POST /call/leader.forget", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Cluster string `json:"cluster"`
+		}
+		if !decode(w, r, &req) {
+			return
+		}
+		if err := l.Forget(req.Cluster); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		reply(w, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("POST /call/placement.assign", func(w http.ResponseWriter, r *http.Request) {
 		var req Assign
 		if !decode(w, r, &req) {
