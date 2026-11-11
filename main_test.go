@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -133,13 +134,13 @@ func TestOnlyRunRelayListens(t *testing.T) {
 		if !ok || fn.Name.Name == "runRelay" {
 			continue
 		}
-		if fn.Name.Name == "serveLocalSocket" {
+		if fn.Name.Name == "serveLocalSocket" || fn.Name.Name == "listenPrivate" {
 			// The one other listener answers the local agent on a unix socket, never on the network.
 			ast.Inspect(fn, func(n ast.Node) bool {
 				if c, ok := n.(*ast.CallExpr); ok {
 					if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Listen" {
 						if lit, ok := c.Args[0].(*ast.BasicLit); !ok || lit.Value != `"unix"` {
-							t.Errorf("%s: serveLocalSocket listens on something but a unix socket", fset.Position(c.Pos()))
+							t.Errorf("%s: %s listens on something but a unix socket", fset.Position(c.Pos()), fn.Name.Name)
 						}
 					}
 				}
@@ -153,5 +154,20 @@ func TestOnlyRunRelayListens(t *testing.T) {
 			}
 			return true
 		})
+	}
+}
+
+// The socket takes orders for the leader and rosters for the relay: nobody else may open it, not even for the
+// instant between the listen and a chmod.
+func TestALocalSocketIsItsOwnersAloneFromTheStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.sock")
+	l, err := listenPrivate(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	st, err := os.Stat(path)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v, err %v", st.Mode().Perm(), err)
 	}
 }

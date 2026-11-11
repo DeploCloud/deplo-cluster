@@ -96,7 +96,7 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 	if stateDir != "" {
 		s, err := bundles.Open(stateDir)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(logger.Writer(), err)
 			return 1
 		}
 		store = s
@@ -123,7 +123,7 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 	if socket != "" {
 		stop, err := serveLocalSocket(l.Handler(), socket)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(logger.Writer(), err)
 			return 1
 		}
 		defer stop()
@@ -132,14 +132,20 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 	return 0
 }
 
+// listenPrivate opens a unix socket only its owner can use, from the moment it exists.
+func listenPrivate(socket string) (net.Listener, error) {
+	_ = os.Remove(socket)
+	old := syscall.Umask(0o177)
+	defer syscall.Umask(old)
+	return net.Listen("unix", socket)
+}
+
 // serveLocalSocket answers the agent that supervises this process on a unix socket: never a network address.
 func serveLocalSocket(h http.Handler, socket string) (func(), error) {
-	_ = os.Remove(socket)
-	sock, err := net.Listen("unix", socket)
+	sock, err := listenPrivate(socket)
 	if err != nil {
 		return nil, err
 	}
-	_ = os.Chmod(socket, 0o600)
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	go srv.Serve(sock)
 	return func() { srv.Close() }, nil
@@ -174,12 +180,10 @@ func runRelay(ctx context.Context, identity func() (*wire.Identity, error), list
 		state = filepath.Join(stateDir, "rosters.json")
 	}
 	r := relay.New(relay.Config{Identity: identity, StateFile: state, Logf: logger.Printf})
-	_ = os.Remove(socket)
-	admin, err := net.Listen("unix", socket)
+	admin, err := listenPrivate(socket)
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(socket, 0o600)
 	servers := []*http.Server{{Handler: r.Admin(), ReadHeaderTimeout: 10 * time.Second}}
 	go servers[0].Serve(admin)
 	for _, a := range addrs {
