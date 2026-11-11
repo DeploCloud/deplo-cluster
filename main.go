@@ -58,7 +58,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
-	status := cluster.Status{Role: role, Epoch: cluster.InitialEpoch}
+	status := cluster.Status{Role: role}
 	fmt.Fprintln(stdout, status)
 	if *version {
 		return 0

@@ -20,7 +20,7 @@ func TestVersionFlagPrintsAndExits(t *testing.T) {
 	if code := run(context.Background(), []string{"--version"}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
-	if !strings.HasPrefix(out.String(), "deplo-cluster ") || !strings.Contains(out.String(), "epoch 0") {
+	if !strings.HasPrefix(out.String(), "deplo-cluster ") || strings.Contains(out.String(), "epoch") {
 		t.Fatalf("unexpected output %q", out.String())
 	}
 }
@@ -40,7 +40,7 @@ func TestStartsAsLeaderAndStopsOnCancel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("did not stop on cancel")
 	}
-	if !strings.Contains(out.String(), " leader epoch 0") {
+	if !strings.Contains(out.String(), " leader\n") {
 		t.Fatalf("unexpected output %q", out.String())
 	}
 }
@@ -50,7 +50,7 @@ func TestRelayNeedsWhereToListenAndWhereToTakeItsRoster(t *testing.T) {
 	if code := run(context.Background(), []string{"relay"}, &out, &errb); code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
-	if !strings.Contains(out.String(), " relay epoch 0") || !strings.Contains(errb.String(), "--listen") {
+	if !strings.Contains(out.String(), " relay\n") || !strings.Contains(errb.String(), "--listen") {
 		t.Fatalf("out %q err %q", out.String(), errb.String())
 	}
 }

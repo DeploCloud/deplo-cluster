@@ -6,9 +6,6 @@ import "fmt"
 // Version is stamped at build time from the release tag.
 var Version = "dev"
 
-// InitialEpoch is what a process reports before it has held any lease.
-const InitialEpoch uint64 = 0
-
 // Role is what this process does for its cluster.
 type Role string
 
@@ -19,12 +16,11 @@ const (
 
 // Status is the one-line identity a process reports.
 type Status struct {
-	Role  Role
-	Epoch uint64
+	Role Role
 }
 
 func (s Status) String() string {
-	return fmt.Sprintf("deplo-cluster %s %s epoch %d", Version, s.Role, s.Epoch)
+	return fmt.Sprintf("deplo-cluster %s %s", Version, s.Role)
 }
 
 // ParseRole reads the optional leading mode: none means leader, `relay` means relay.
