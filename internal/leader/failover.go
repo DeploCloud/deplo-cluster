@@ -260,6 +260,8 @@ type outcome struct {
 	member  string
 	refusal *placement.Refusal
 	skipped bool
+	// why says what skipped a move a person asked for.
+	why string
 }
 
 func (l *Leader) startOrder(b bundles.Bundle) *lease.Start {
@@ -312,15 +314,18 @@ func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error 
 }
 
 // relocate places one workload on a member that can take it and has it started there. It changes nothing
-// on any failure: the workload stays where it was recorded, or waits.
-func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, replica int, from string) outcome {
+// on any failure: the workload stays where it was recorded, or waits. asked is the bundle of a move a person
+// ordered, used in place of the kept one; its member is checked again right before each start.
+func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, replica int, from string, asked *bundles.Bundle) outcome {
 	meta, err := l.cfg.Bundles.Meta(clusterID, kind, id)
 	if err != nil {
 		l.cfg.Logf("deplo-cluster: %s %s has no bundle, so it does not fail over", kind, id)
-		return outcome{skipped: true}
+		return outcome{skipped: true, why: NotPlaced}
 	}
-	b, err := l.cfg.Bundles.Unseal(clusterID, kind, id)
-	if err != nil {
+	var b bundles.Bundle
+	if asked != nil {
+		b = *asked
+	} else if b, err = l.cfg.Bundles.Unseal(clusterID, kind, id); err != nil {
 		l.cfg.Logf("deplo-cluster: %s %s: %v", kind, id, err)
 		return outcome{skipped: true}
 	}
@@ -330,7 +335,15 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		c := l.clusters[clusterID]
 		if c == nil || c.superseded {
 			l.mu.Unlock()
-			return outcome{skipped: true}
+			return outcome{skipped: true, why: NotLeading}
+		}
+		if asked != nil {
+			left, why := c.leftBy(kind, id, l.cfg.Now())
+			if why != "" {
+				l.mu.Unlock()
+				return outcome{skipped: true, why: why}
+			}
+			from = left
 		}
 		var entry lease.Entry
 		for _, e := range c.placement {
@@ -512,6 +525,8 @@ func (l *Leader) Failover(ctx context.Context) {
 	var jobs []failoverJob
 	var retries []retryJob
 	l.mu.Lock()
+	moves := l.pending
+	l.pending = nil
 	ids := make([]string, 0, len(l.clusters))
 	for id := range l.clusters {
 		ids = append(ids, id)
@@ -570,6 +585,9 @@ func (l *Leader) Failover(ctx context.Context) {
 	for _, r := range retries {
 		l.retry(ctx, r)
 	}
+	for _, m := range moves {
+		l.runMove(ctx, m)
+	}
 }
 
 // restorable says whether the workload's bundle names a backup that did not go down with its member.
@@ -595,7 +613,7 @@ func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 	}
 	moved, waiting := []string{}, []left{}
 	for _, e := range Order(movable, meta) {
-		o := l.relocate(ctx, j.cluster, e.Kind, e.ID, e.Replica, j.from)
+		o := l.relocate(ctx, j.cluster, e.Kind, e.ID, e.Replica, j.from, nil)
 		switch {
 		case o.skipped:
 		case o.refusal != nil:
@@ -612,7 +630,7 @@ func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 
 func (l *Leader) retry(ctx context.Context, r retryJob) {
 	e := lease.Entry{Kind: r.w.Kind, ID: r.w.ID, Replica: r.w.Replica, Slug: r.w.Slug}
-	o := l.relocate(ctx, r.cluster, e.Kind, e.ID, e.Replica, r.w.From)
+	o := l.relocate(ctx, r.cluster, e.Kind, e.ID, e.Replica, r.w.From, nil)
 	if o.member != "" || o.skipped {
 		if o.skipped {
 			l.mu.Lock()
