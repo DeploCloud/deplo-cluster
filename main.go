@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -170,7 +171,7 @@ func runRelay(ctx context.Context, identity func() (*wire.Identity, error), list
 	}
 	state := ""
 	if stateDir != "" {
-		state = stateDir + "/rosters.json"
+		state = filepath.Join(stateDir, "rosters.json")
 	}
 	r := relay.New(relay.Config{Identity: identity, StateFile: state, Logf: logger.Printf})
 	_ = os.Remove(socket)

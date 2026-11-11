@@ -1,7 +1,10 @@
 // Package placement is the one rule that picks a cluster member for a workload (spec #176).
 package placement
 
-import "sort"
+import (
+	"slices"
+	"sort"
+)
 
 // MinMB is the least memory a workload is assumed to need.
 const MinMB = 256
@@ -72,15 +75,6 @@ func Needed(w Workload) int {
 	return n
 }
 
-func has(list []string, v string) bool {
-	for _, s := range list {
-		if s == v {
-			return true
-		}
-	}
-	return false
-}
-
 // Place picks the member for w: eligible members, then database of its Environment, no sibling, most free after placing, fewest workloads.
 func Place(cluster string, w Workload, members []Member) Answer {
 	need := Needed(w)
@@ -94,12 +88,12 @@ func Place(cluster string, w Workload, members []Member) Answer {
 		}
 	}
 	for _, m := range live {
-		if len(w.Archs) == 0 || has(w.Archs, m.Arch) {
+		if len(w.Archs) == 0 || slices.Contains(w.Archs, m.Arch) {
 			arch = append(arch, m)
 		}
 	}
 	for _, m := range arch {
-		if w.Image == "" || has(m.Images, w.Image) {
+		if w.Image == "" || slices.Contains(m.Images, w.Image) {
 			image = append(image, m)
 		}
 	}
@@ -120,10 +114,10 @@ func Place(cluster string, w Workload, members []Member) Answer {
 	}
 	sort.SliceStable(fit, func(i, j int) bool {
 		a, b := fit[i], fit[j]
-		if da, db := has(a.DatabaseEnvs, w.Environment), has(b.DatabaseEnvs, w.Environment); da != db {
+		if da, db := slices.Contains(a.DatabaseEnvs, w.Environment), slices.Contains(b.DatabaseEnvs, w.Environment); da != db {
 			return da
 		}
-		if sa, sb := has(a.Placed, w.ID), has(b.Placed, w.ID); sa != sb {
+		if sa, sb := slices.Contains(a.Placed, w.ID), slices.Contains(b.Placed, w.ID); sa != sb {
 			return !sa
 		}
 		if a.FreeMB != b.FreeMB {
@@ -166,7 +160,7 @@ func Spread(cluster string, w Workload, members []Member, n int, current []strin
 		facts[at[id]].Placed = append(facts[at[id]].Placed, w.ID)
 	}
 	for i := range out {
-		if id := runs(i); id != "" && !has(facts[at[id]].Placed, w.ID) {
+		if id := runs(i); id != "" && !slices.Contains(facts[at[id]].Placed, w.ID) {
 			take(i, id)
 		}
 	}
@@ -176,7 +170,7 @@ func Spread(cluster string, w Workload, members []Member, n int, current []strin
 		}
 		var none []Member
 		for _, m := range facts {
-			if !has(m.Placed, w.ID) {
+			if !slices.Contains(m.Placed, w.ID) {
 				none = append(none, m)
 			}
 		}
