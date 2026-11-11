@@ -41,6 +41,8 @@ type members struct {
 	refuse map[string]bool
 	// unrestored makes a member bring a workload up without restoring its backup, as an older agent would.
 	unrestored map[string]bool
+	// unpromoted makes a member fail to promote the standby it holds.
+	unpromoted map[string]bool
 	// startLeft is how long the leader gave each member's last start order.
 	startLeft map[string]time.Duration
 	// returned is what a member that came back says it removed, once the leader asks.
@@ -52,7 +54,7 @@ type members struct {
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -96,8 +98,12 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 				m.startLeft[to.Fingerprint] = left
 				r.Started = !m.refuse[to.Fingerprint]
 				r.Restored = r.Started && o.Start.Restore != nil && !m.unrestored[to.Fingerprint]
+				r.Promoted = r.Started && o.Start.Promote != nil
 				if !r.Started {
 					r = lease.Reply{Error: "no room on this disk"}
+				}
+				if o.Start.Promote != nil && m.unpromoted[to.Fingerprint] {
+					r = lease.Reply{Error: "the standby copy could not be promoted"}
 				}
 			}
 		}

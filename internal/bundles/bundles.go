@@ -30,6 +30,15 @@ type Meta struct {
 	CreatedAt   string   `json:"createdAt"`
 	// Restore names the backup the bundle restores from. Put reads it from the bundle itself, never from the caller.
 	Restore *RestoreRef `json:"restore,omitempty"`
+	// Promotes says the bundle knows how to promote a standby copy. Put reads it from the bundle itself too.
+	Promotes bool `json:"promotes,omitempty"`
+}
+
+// Promote is how a standby copy of the workload becomes the workload: one command inside its container.
+type Promote struct {
+	Container string   `json:"container"`
+	User      string   `json:"user,omitempty"`
+	Command   []string `json:"command"`
 }
 
 // RestoreRef is the part of a bundle's restore that is no secret: which backup, and who can read it.
@@ -90,6 +99,8 @@ type Bundle struct {
 	Stack        Stack  `json:"stack"`
 	// Restore is set for a workload that keeps data: without it the workload waits for its member.
 	Restore *Restore `json:"restore,omitempty"`
+	// Promote is set while the workload keeps a standby copy: a failover promotes it instead of restoring.
+	Promote *Promote `json:"promote,omitempty"`
 }
 
 // Held is one stored bundle as the list shows it.
@@ -197,7 +208,7 @@ func (s *Store) Put(cluster, kind, id, deploymentID string, sealed []byte, meta 
 	if b.Kind != kind || b.Workload != id || b.DeploymentID != deploymentID {
 		return errors.New("the bundle names another workload or deployment than the call")
 	}
-	meta.Restore = nil
+	meta.Restore, meta.Promotes = nil, b.Promote != nil && b.Promote.Container != "" && len(b.Promote.Command) > 0
 	if b.Restore != nil {
 		ref := b.Restore.RestoreRef
 		meta.Restore = &ref
