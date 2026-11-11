@@ -648,7 +648,7 @@ func replicaMembers(placement []lease.Entry, kind, id string) []string {
 }
 
 // wait leaves a workload without a member and queues it for the next retry.
-func (l *Leader) wait(clusterID string, e lease.Entry, from, reason string) {
+func (l *Leader) wait(clusterID string, e lease.Entry, from, reason, why string) {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil {
@@ -663,7 +663,7 @@ func (l *Leader) wait(clusterID string, e lease.Entry, from, reason string) {
 		}
 	}
 	key := entryKey(e.Kind, e.ID, e.Replica)
-	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, From: from, Reason: reason}
+	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, From: from, Reason: reason, Wait: why}
 	c.waiting[key] = &Waiting{Kind: e.Kind, ID: e.ID, Replica: e.Replica, From: from, Reason: reason, Slug: e.Slug, NextTry: l.cfg.Now().Add(RetryEvery)}
 	members := replicaMembers(c.placement, e.Kind, e.ID)
 	epoch := c.epoch
@@ -834,7 +834,7 @@ func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 		case o.skipped:
 			again = again || o.again
 		case o.refusal != nil:
-			l.wait(j.cluster, e, j.from, StoppedAnswering)
+			l.wait(j.cluster, e, j.from, StoppedAnswering, string(o.refusal.Reason))
 			if !slices.ContainsFunc(waiting, func(w left) bool { return w.Kind == e.Kind && w.ID == e.ID }) {
 				waiting = append(waiting, left{e.Kind, e.ID, string(o.refusal.Reason), o.refusal.NeededMB})
 			}
@@ -871,8 +871,14 @@ func (l *Leader) retry(ctx context.Context, r retryJob) {
 	}
 	l.mu.Lock()
 	if c := l.clusters[r.cluster]; c != nil {
-		if w := c.waiting[entryKey(e.Kind, e.ID, e.Replica)]; w != nil {
+		key := entryKey(e.Kind, e.ID, e.Replica)
+		if w := c.waiting[key]; w != nil {
 			w.NextTry = l.cfg.Now().Add(RetryEvery)
+			// A retry may be refused for another reason than the first try was.
+			if a, ok := c.auth[key]; ok && o.refusal != nil {
+				a.Wait = string(o.refusal.Reason)
+				c.auth[key] = a
+			}
 			l.saveFailover()
 		}
 	}

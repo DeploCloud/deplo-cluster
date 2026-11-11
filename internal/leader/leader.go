@@ -127,6 +127,8 @@ type authority struct {
 	From   string `json:"from,omitempty"`
 	Reason string `json:"reason,omitempty"`
 	Seq    uint64 `json:"seq,omitempty"`
+	// Wait is why a waiting replica found no member (the placement's refusal).
+	Wait string `json:"wait,omitempty"`
 	// BackupID and BackupAt name the backup a moved workload was restored from; RestoreMs is how long that took.
 	BackupID  string `json:"backupId,omitempty"`
 	BackupAt  string `json:"backupAt,omitempty"`
@@ -597,10 +599,12 @@ type MemberView struct {
 
 // ClusterView is one cluster as the snapshot shows it.
 type ClusterView struct {
-	Epoch      uint64        `json:"epoch"`
-	Superseded bool          `json:"superseded"`
-	Members    []MemberView  `json:"members"`
-	Placement  []lease.Entry `json:"placement"`
+	Epoch      uint64 `json:"epoch"`
+	Superseded bool   `json:"superseded"`
+	// Leads says enough members answer for this leader to renew and move work right now.
+	Leads     bool          `json:"leads"`
+	Members   []MemberView  `json:"members"`
+	Placement []lease.Entry `json:"placement"`
 	// Moves are the placements the leader made on its own that no roster has repeated yet.
 	Moves []Move `json:"moves"`
 }
@@ -611,6 +615,8 @@ type Move struct {
 	From   string `json:"from"`
 	Reason string `json:"reason"`
 	Seq    uint64 `json:"seq"`
+	// Wait is why a waiting replica found no member, as the failover event's own reason.
+	Wait string `json:"wait,omitempty"`
 	// BackupID and BackupAt name the backup the workload was restored from, when it was; RestoreMs is how long that took.
 	BackupID  string `json:"backupId,omitempty"`
 	BackupAt  string `json:"backupAt,omitempty"`
@@ -631,14 +637,14 @@ func (l *Leader) Snapshot() Snapshot {
 	defer l.mu.Unlock()
 	s := Snapshot{Head: l.log.Head(), Clusters: map[string]ClusterView{}}
 	for id, c := range l.clusters {
-		v := ClusterView{Epoch: c.epoch, Superseded: c.superseded, Members: []MemberView{}, Placement: append([]lease.Entry{}, c.placement...)}
+		v := ClusterView{Epoch: c.epoch, Superseded: c.superseded, Leads: c.leads(l.cfg.Now()), Members: []MemberView{}, Placement: append([]lease.Entry{}, c.placement...)}
 		for _, m := range c.members {
 			v.Members = append(v.Members, MemberView{ID: m.ID, State: string(m.state)})
 		}
 		sort.Slice(v.Members, func(i, j int) bool { return v.Members[i].ID < v.Members[j].ID })
 		v.Moves = []Move{}
 		for _, a := range c.auth {
-			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq, BackupID: a.BackupID, BackupAt: a.BackupAt, RestoreMs: a.RestoreMs, Promoted: a.Promoted})
+			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq, Wait: a.Wait, BackupID: a.BackupID, BackupAt: a.BackupAt, RestoreMs: a.RestoreMs, Promoted: a.Promoted})
 		}
 		sort.Slice(v.Moves, func(i, j int) bool {
 			a, b := v.Moves[i], v.Moves[j]

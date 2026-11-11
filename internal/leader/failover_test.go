@@ -427,6 +427,10 @@ func TestAWaitingWorkloadIsNamedInTheSnapshotAndStaysWhenTheRosterRepeatsIt(t *t
 	if len(moves) != 1 || moves[0].Member != "" || moves[0].From != "srv_a" {
 		t.Fatalf("moves %+v", moves)
 	}
+	// What keeps it waiting is said too: a control plane that missed the event reads it here.
+	if moves[0].Wait != "no_room" {
+		t.Fatalf("the wait is for %q, want no_room", moves[0].Wait)
+	}
 	r := staleRoster("srv_a", "srv_b")
 	r.Placement[0].Member = ""
 	_ = f.l.SetRoster(r)
