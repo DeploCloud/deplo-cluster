@@ -109,3 +109,60 @@ func TestAnUnbuiltWorkloadSkipsTheImageAndArchitectureSteps(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func spread(t *testing.T, n int, current []string, ms ...Member) []string {
+	t.Helper()
+	got, r := Spread("eu", web(), ms, n, current)
+	if r != nil {
+		t.Fatalf("refused: %+v", r)
+	}
+	return got
+}
+
+func TestSpreadPutsEachReplicaOnAMemberWithNoneOfTheOthers(t *testing.T) {
+	got := spread(t, 3, nil, member("a", 4096, 0), member("b", 2048, 0), member("c", 1024, 0))
+	if got[0] != "a" || got[1] != "b" || got[2] != "c" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestSpreadDoublesUpOnceEveryMemberHasOne(t *testing.T) {
+	got := spread(t, 3, nil, member("a", 4096, 0), member("b", 2048, 0))
+	if got[0] != "a" || got[1] != "b" || got[2] != "a" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestSpreadKeepsAReplicaWhereItRuns(t *testing.T) {
+	// b runs replica 0 and has the least free memory: it still keeps it, and only the new replica is placed.
+	got := spread(t, 2, []string{"b"}, member("a", 4096, 0), member("b", 100, 0), member("c", 2048, 0))
+	if got[0] != "b" || got[1] != "a" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestSpreadMovesADoubledReplicaOnlyToAMemberWithNone(t *testing.T) {
+	cur := []string{"a", "b", "a"}
+	if got := spread(t, 3, cur, member("a", 4096, 0), member("b", 4096, 0)); got[2] != "a" {
+		t.Fatalf("a doubled replica moved between members that both hold one: %v", got)
+	}
+	if got := spread(t, 3, cur, member("a", 4096, 0), member("b", 4096, 0), member("c", 512, 0)); got[0] != "a" || got[1] != "b" || got[2] != "c" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestSpreadLeavesAMemberThatStoppedAnswering(t *testing.T) {
+	dead := member("b", 4096, 0)
+	dead.Online = false
+	got := spread(t, 2, []string{"a", "b"}, member("a", 4096, 0), dead, member("c", 1024, 0))
+	if got[0] != "a" || got[1] != "c" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestSpreadRefusesWhenAReplicaHasNoRoom(t *testing.T) {
+	_, r := Spread("eu", web(), []Member{member("a", 600, 0)}, 2, nil)
+	if r == nil || r.Reason != NoRoom {
+		t.Fatalf("refusal %+v", r)
+	}
+}
