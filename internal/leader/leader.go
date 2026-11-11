@@ -63,6 +63,8 @@ type member struct {
 	Member
 	lastAck time.Time
 	state   lease.State
+	// presumed is when the longest lease another leader may have given it runs out; zero once it answered this one.
+	presumed time.Time
 }
 
 type cluster struct {
@@ -202,7 +204,7 @@ func (l *Leader) SetRoster(r Roster) error {
 			next[m.ID] = old
 			continue
 		}
-		next[m.ID] = &member{Member: m, lastAck: now, state: lease.OK}
+		next[m.ID] = &member{Member: m, lastAck: now, state: lease.OK, presumed: now.Add(lease.FenceAfter + lease.ExtendFor)}
 	}
 	c.members, c.placement = next, l.reconcilePlacement(c, r.Placement)
 	c.standbys = c.keptStandbys(r.Standbys)
@@ -363,6 +365,9 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 		l.mu.Lock()
 		m.lastAck = l.cfg.Now()
 		// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
+		if o.ExtendSeconds == 0 {
+			m.presumed = time.Time{}
+		}
 		if cl := l.clusters[clusterID]; cl != nil && o.ExtendSeconds == 0 && !cl.extended[m.ID].IsZero() {
 			delete(cl.extended, m.ID)
 			l.saveFailover()
