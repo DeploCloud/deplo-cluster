@@ -61,15 +61,9 @@ func (l *Leader) follow(clusterID string, e lease.Entry, from string) {
 		l.mu.Unlock()
 		return
 	}
-	found := false
-	for i := range c.placement {
-		p := &c.placement[i]
-		if p.Kind == e.Kind && p.ID == e.ID && p.Replica == e.Replica {
-			p.Member, found = e.Member, true
-			e = *p
-		}
-	}
-	if !found {
+	if p, ok := c.place(e.Kind, e.ID, e.Replica, e.Member); ok {
+		e = p
+	} else {
 		c.placement = append(c.placement, e)
 	}
 	key := entryKey(e.Kind, e.ID, e.Replica)
@@ -78,6 +72,5 @@ func (l *Leader) follow(clusterID string, e lease.Entry, from string) {
 	members, epoch := replicaMembers(c.placement, e.Kind, e.ID), c.epoch
 	l.saveFailover()
 	l.mu.Unlock()
-	ev := l.log.Append("placement", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "members": members, "epoch": epoch})
-	l.stamp(clusterID, key, ev.Seq)
+	l.stamp(clusterID, key, l.tellPlacement(clusterID, e.Kind, e.ID, members, epoch).Seq)
 }

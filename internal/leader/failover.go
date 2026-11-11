@@ -580,14 +580,7 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 		l.cfg.Logf("deplo-cluster: %s started %s for epoch %d, which this leader no longer leads: not recorded", e.Member, e.Slug, epoch)
 		return false
 	}
-	found := false
-	for i := range c.placement {
-		p := &c.placement[i]
-		if p.Kind == e.Kind && p.ID == e.ID && p.Replica == e.Replica {
-			p.Member, found = e.Member, true
-		}
-	}
-	if !found {
+	if _, ok := c.place(e.Kind, e.ID, e.Replica, e.Member); !ok {
 		c.placement = append(c.placement, e)
 	}
 	if m := c.members[e.Member]; m != nil && needMB > 0 {
@@ -613,7 +606,7 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 	members := replicaMembers(c.placement, e.Kind, e.ID)
 	l.saveFailover()
 	l.mu.Unlock()
-	l.log.Append("placement", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "members": members, "epoch": epoch})
+	l.tellPlacement(clusterID, e.Kind, e.ID, members, epoch)
 	ev := l.log.Append("failed_over", clusterID, moved)
 	l.stamp(clusterID, key, ev.Seq)
 	return true
@@ -656,12 +649,7 @@ func (l *Leader) wait(clusterID string, e lease.Entry, from, reason, why string)
 		return
 	}
 	e.Member = ""
-	for i := range c.placement {
-		p := &c.placement[i]
-		if p.Kind == e.Kind && p.ID == e.ID && p.Replica == e.Replica {
-			p.Member = ""
-		}
-	}
+	c.place(e.Kind, e.ID, e.Replica, "")
 	key := entryKey(e.Kind, e.ID, e.Replica)
 	c.auth[key] = authority{At: l.cfg.Now(), Entry: e, From: from, Reason: reason, Wait: why}
 	c.waiting[key] = &Waiting{Kind: e.Kind, ID: e.ID, Replica: e.Replica, From: from, Reason: reason, Slug: e.Slug, NextTry: l.cfg.Now().Add(RetryEvery)}
@@ -669,8 +657,7 @@ func (l *Leader) wait(clusterID string, e lease.Entry, from, reason, why string)
 	epoch := c.epoch
 	l.saveFailover()
 	l.mu.Unlock()
-	ev := l.log.Append("placement", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "members": members, "epoch": epoch})
-	l.stamp(clusterID, key, ev.Seq)
+	l.stamp(clusterID, key, l.tellPlacement(clusterID, e.Kind, e.ID, members, epoch).Seq)
 }
 
 type failoverJob struct {

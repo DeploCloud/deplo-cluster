@@ -372,8 +372,25 @@ func (l *Leader) Assign(a Assign) error {
 	epoch := c.epoch
 	l.saveFailover()
 	l.mu.Unlock()
-	l.log.Append("placement", a.Cluster, map[string]any{"kind": a.Kind, "workloadId": a.ID, "members": a.Members, "epoch": epoch})
+	l.tellPlacement(a.Cluster, a.Kind, a.ID, a.Members, epoch)
 	return nil
+}
+
+// tellPlacement is the one event that says where a workload's replicas are.
+func (l *Leader) tellPlacement(clusterID, kind, id string, members []string, epoch uint64) events.Event {
+	return l.log.Append("placement", clusterID, map[string]any{"kind": kind, "workloadId": id, "members": members, "epoch": epoch})
+}
+
+// place records which member runs one replica and returns its entry as it stands now; false when the placement
+// does not hold that replica. The caller holds l.mu.
+func (c *cluster) place(kind, id string, replica int, member string) (lease.Entry, bool) {
+	for i := range c.placement {
+		if p := &c.placement[i]; p.Kind == kind && p.ID == id && p.Replica == replica {
+			p.Member = member
+			return *p, true
+		}
+	}
+	return lease.Entry{}, false
 }
 
 // Tick renews every member's lease once, then reports each member whose state changed.
