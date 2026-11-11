@@ -3,6 +3,7 @@ package leader_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -187,5 +188,33 @@ func TestPlacementPlaceNeverPicksAnExcludedMember(t *testing.T) {
 	req.Exclude = []string{"srv_a", "srv_b"}
 	if ans, _ := f.l.Place(req); ans.Refusal == nil || ans.Refusal.Reason != "no_member_online" {
 		t.Fatalf("answer %+v", ans)
+	}
+}
+
+func TestAMoveNeverPromotesAStandbyWhileItsDatabasesMemberHoldsItsLeaseAgain(t *testing.T) {
+	f := withStandby(t, "srv_b", nil, abc())
+	f.ms.unpromoted["fp-srv_b"] = true
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(90 * time.Second)
+	f.ms.unpromoted["fp-srv_b"] = false
+	rec, _ := age.ParseX25519Recipient(f.store.PublicKey())
+	var out bytes.Buffer
+	w, _ := age.Encrypt(&out, rec)
+	raw, _ := json.Marshal(bundles.Bundle{V: 1, Kind: "database", Workload: "db_1", DeploymentID: "rev_1",
+		Stack: bundles.Stack{Slug: "db-main", ComposeYAML: "services: {}"}, Restore: backup(""), Promote: promote})
+	w.Write(raw)
+	w.Close()
+	ask := leader.MoveRequest{Cluster: "clu_1", Kind: "database", ID: "db_1", Sealed: base64.StdEncoding.EncodeToString(out.Bytes())}
+	if a := f.l.Move(ask); !a.OK {
+		t.Fatalf("the move was refused: %+v", a)
+	}
+	before := len(f.ms.starts["fp-srv_b"])
+	f.ms.cut["fp-srv_a"] = false
+	f.pass(5 * time.Second)
+	if len(f.ms.starts["fp-srv_b"]) != before || len(f.ms.starts["fp-srv_c"]) != 0 || placed(f, "db_1") != "srv_a" {
+		t.Fatalf("a second writer was started while the database's member holds its lease again: database on %q", placed(f, "db_1"))
+	}
+	if failed := events(f, "move_failed"); len(failed) != 1 || !strings.Contains(failed[0], `"reason":"still_answering"`) {
+		t.Fatalf("move_failed events %v", failed)
 	}
 }

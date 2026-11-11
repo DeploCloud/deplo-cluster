@@ -343,6 +343,14 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		return outcome{skipped: true}
 	}
 	exclude := map[string]bool{}
+	if asked != nil {
+		// A promotion is a start too: the member a person's move leaves is checked before it, never two writers.
+		left, why := l.leftNow(clusterID, kind, id)
+		if why != "" {
+			return outcome{skipped: true, why: why}
+		}
+		from = left
+	}
 	// A standby copy that follows the workload is promoted where it is; only when that fails is a backup restored.
 	if sb := l.standbyFor(clusterID, kind, id, from); sb != "" && b.Promote != nil {
 		if l.promote(ctx, clusterID, kind, id, replica, from, sb, b) {

@@ -64,6 +64,16 @@ func (c *cluster) leftBy(kind, id string, now time.Time) (from, why string) {
 	return from, ""
 }
 
+func (l *Leader) leftNow(clusterID, kind, id string) (from, why string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c := l.clusters[clusterID]
+	if c == nil || c.superseded {
+		return "", NotLeading
+	}
+	return c.leftBy(kind, id, l.cfg.Now())
+}
+
 // Move takes a person's order to bring a waiting workload back from a backup. It answers at once; the next
 // failover pass makes the move, so a long restore never holds the call.
 func (l *Leader) Move(r MoveRequest) MoveAnswer {
