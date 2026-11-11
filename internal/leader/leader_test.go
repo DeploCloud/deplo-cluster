@@ -47,6 +47,8 @@ type members struct {
 	startLeft map[string]time.Duration
 	// returned is what a member that came back says it removed, once the leader asks.
 	returned map[string]*lease.Returned
+	// later is what a member says of the data it kept past its return, when the leader still asks about it.
+	later map[string]*lease.Later
 	// restoreTakes is how long a member takes over a start order that restores a backup.
 	restoreTakes time.Duration
 	// slow is how long a member's plain renewal takes to reach it.
@@ -54,7 +56,7 @@ type members struct {
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, later: map[string]*lease.Later{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -92,6 +94,8 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 			m.orders[to.Fingerprint] = append(m.orders[to.Fingerprint], o)
 			if o.Return {
 				r.Returned = m.returned[to.Fingerprint]
+			} else if len(o.Keep) > 0 {
+				r.Later = m.later[to.Fingerprint]
 			}
 			if o.Start != nil {
 				m.starts[to.Fingerprint] = append(m.starts[to.Fingerprint], o)
