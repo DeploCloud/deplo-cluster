@@ -295,3 +295,23 @@ func TestALeaderAsksAgainBeforeItExtendsItsLeases(t *testing.T) {
 		t.Fatal("it still leads")
 	}
 }
+
+// More than half of the members go at once, with Deplo up: its word only breaks a tie. The member that is
+// left is renewed no more, until the ones that are gone for good are taken out of the cluster.
+func TestWithMoreThanHalfGoneTheRestIsRenewedAgainOnceTheyAreRemoved(t *testing.T) {
+	f := abcWithDB(t)
+	f.ms.cut["fp-srv_a"], f.ms.cut["fp-srv_b"] = true, true
+	f.pass(2 * time.Minute)
+	if f.clk.Now().Before(f.ms.leaseEnd("fp-srv_c")) || placed(f, "db_1") != "srv_a" {
+		t.Fatal("a leader that hears one of three went on leading")
+	}
+	r := staleRoster("srv_c")
+	r.Placement = nil
+	if err := f.l.SetRoster(r); err != nil {
+		t.Fatal(err)
+	}
+	f.pass(10 * time.Second)
+	if !f.clk.Now().Before(f.ms.leaseEnd("fp-srv_c")) {
+		t.Fatal("the member that is left was not renewed once it was the whole cluster")
+	}
+}
