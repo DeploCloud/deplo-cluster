@@ -118,6 +118,18 @@ func (l *Leader) reconcilePlacement(c *cluster, roster []lease.Entry) []lease.En
 	return out
 }
 
+// adoptWaiting takes over what the roster says is waiting for room, so a leader that starts leading keeps
+// trying what the one before it could not place; the caller holds l.mu.
+func (l *Leader) adoptWaiting(c *cluster, now time.Time) {
+	for _, e := range c.placement {
+		key := entryKey(e.Kind, e.ID, e.Replica)
+		if e.Member == "" && c.waiting[key] == nil {
+			c.waiting[key] = &Waiting{Kind: e.Kind, ID: e.ID, Replica: e.Replica, Reason: StoppedAnswering, Slug: e.Slug, NextTry: now.Add(RetryEvery)}
+		}
+	}
+	l.saveFailover()
+}
+
 func (l *Leader) loadRosters() {
 	var saved map[string]Roster
 	raw, err := os.ReadFile(filepath.Join(l.cfg.StateDir, "rosters.json"))
@@ -125,7 +137,10 @@ func (l *Leader) loadRosters() {
 		return
 	}
 	for _, r := range saved {
-		_ = l.SetRoster(r)
+		// Refused: another leader took over while this one was down, so what it had moved is not its to keep.
+		if errors.Is(l.SetRoster(r), ErrOlderEpoch) {
+			delete(l.restored, r.Cluster)
+		}
 	}
 }
 

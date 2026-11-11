@@ -165,7 +165,8 @@ func (l *Leader) SetRoster(r Roster) error {
 		r.Epoch = 1
 	}
 	l.mu.Lock()
-	if held := l.epochs[r.Cluster]; r.Epoch < held {
+	held := l.epochs[r.Cluster]
+	if r.Epoch < held {
 		l.mu.Unlock()
 		return fmt.Errorf("%w: %d, asked for %d", ErrOlderEpoch, held, r.Epoch)
 	}
@@ -174,10 +175,16 @@ func (l *Leader) SetRoster(r Roster) error {
 		c = l.newCluster(r.Cluster)
 		l.clusters[r.Cluster] = c
 	}
+	// A newer epoch means another leader led in between: this one heard nobody meanwhile, and what it moved
+	// before is that leader's to have changed. Every lease starts over and its own moves are dropped.
+	again := c.epoch != 0 && r.Epoch > c.epoch
+	if again {
+		c.auth, c.waiting, c.moved = map[string]authority{}, map[string]*Waiting{}, map[string]bool{}
+	}
 	now := l.cfg.Now()
 	next := map[string]*member{}
 	for _, m := range r.Members {
-		if old := c.members[m.ID]; old != nil && old.Fingerprint == m.Fingerprint {
+		if old := c.members[m.ID]; old != nil && old.Fingerprint == m.Fingerprint && !again {
 			old.Member = m
 			next[m.ID] = old
 			continue
@@ -185,7 +192,10 @@ func (l *Leader) SetRoster(r Roster) error {
 		next[m.ID] = &member{Member: m, lastAck: now, state: lease.OK}
 	}
 	c.members, c.placement = next, l.reconcilePlacement(c, r.Placement)
-	changed := r.Epoch != l.epochs[r.Cluster]
+	if again || c.epoch == 0 {
+		l.adoptWaiting(c, now)
+	}
+	changed := r.Epoch != c.epoch && (c.epoch != 0 || r.Epoch != held)
 	if r.Epoch > c.epoch {
 		c.superseded = false
 	}
@@ -290,9 +300,15 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	if r.Error == lease.StaleEpoch {
 		l.mu.Lock()
 		cl := l.clusters[clusterID]
-		fresh := cl != nil && !cl.superseded
+		// A refusal of an order sent before a newer roster arrived says nothing about the epoch held now.
+		fresh := cl != nil && !cl.superseded && r.Epoch > cl.epoch
 		if fresh {
 			cl.superseded = true
+		}
+		// The epoch that replaced this leader is another leader's: only a roster newer than it leads again here.
+		if r.Epoch >= l.epochs[clusterID] {
+			l.epochs[clusterID] = r.Epoch + 1
+			l.saveEpochs()
 		}
 		l.mu.Unlock()
 		if fresh {
