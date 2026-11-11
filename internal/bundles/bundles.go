@@ -219,6 +219,15 @@ func (s *Store) PutBase64(cluster, kind, id, deploymentID, sealed string, meta M
 	return s.Put(cluster, kind, id, deploymentID, raw, meta)
 }
 
+// OpenBase64 opens a bundle sealed to this leader without keeping it: the bundle of one asked-for move.
+func (s *Store) OpenBase64(sealed string) (Bundle, error) {
+	raw, err := base64.StdEncoding.DecodeString(sealed)
+	if err != nil {
+		return Bundle{}, errors.New("the sealed bundle is not base64")
+	}
+	return s.open(raw)
+}
+
 // Drop forgets the workload's bundle; nothing held is not an error.
 func (s *Store) Drop(cluster, kind, id string) error {
 	s.mu.Lock()

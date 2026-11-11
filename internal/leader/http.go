@@ -57,6 +57,12 @@ func (l *Leader) Handler() http.Handler {
 		}
 		reply(w, ans)
 	})
+	mux.HandleFunc("POST /call/failover.move", func(w http.ResponseWriter, r *http.Request) {
+		var req MoveRequest
+		if decode(w, r, &req) {
+			reply(w, l.Move(req))
+		}
+	})
 	l.bundleRoutes(mux)
 	mux.HandleFunc("GET /watch", l.watch)
 	return mux

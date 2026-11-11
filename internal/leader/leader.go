@@ -107,6 +107,9 @@ type Leader struct {
 	foMu sync.Mutex
 	// restored is the failover state read at start, handed to each cluster when its roster first arrives.
 	restored map[string]persisted
+	// pending is the moves a person asked for, made by the next failover pass.
+	// ponytail: kept in memory, so a leader that restarts first forgets the ask and the person asks again.
+	pending []pendingMove
 }
 
 // New returns a leader; Run starts renewing.
