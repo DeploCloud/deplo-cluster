@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -188,6 +189,8 @@ type PlaceRequest struct {
 	Cluster  string             `json:"cluster"`
 	Workload placement.Workload `json:"workload"`
 	Members  []placement.Member `json:"members"`
+	// Exclude names members never chosen: a standby copy never shares a member with its workload.
+	Exclude []string `json:"exclude,omitempty"`
 }
 
 // Place answers with a member or a structured refusal; a member that is not leased by this leader is never chosen.
@@ -198,7 +201,7 @@ func (l *Leader) Place(r PlaceRequest) (placement.Answer, error) {
 	if c == nil {
 		return placement.Answer{}, errors.New("this leader does not serve that cluster")
 	}
-	facts := c.memberFacts(l.cfg.Now())
+	facts := slices.DeleteFunc(c.memberFacts(l.cfg.Now()), func(f placement.Member) bool { return slices.Contains(r.Exclude, f.ID) })
 	given := map[string]placement.Member{}
 	for _, m := range r.Members {
 		given[m.ID] = m
@@ -307,6 +310,8 @@ func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error 
 		return errors.New("the member did not bring it up")
 	case o.Start.Restore != nil && !r.Restored:
 		return errors.New("the member brought it up without restoring its backup")
+	case o.Start.Promote != nil && !r.Promoted:
+		return errors.New("the member brought it up without promoting its standby copy")
 	}
 	return nil
 }
@@ -325,6 +330,13 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		return outcome{skipped: true}
 	}
 	exclude := map[string]bool{}
+	// A standby copy that follows the workload is promoted where it is; only when that fails is a backup restored.
+	if sb := l.standbyFor(clusterID, kind, id, from); sb != "" && b.Promote != nil {
+		if l.promote(ctx, clusterID, kind, id, replica, from, sb, b) {
+			return outcome{member: sb}
+		}
+		exclude[sb] = true
+	}
 	for try := 0; try < maxStartTries; try++ {
 		l.mu.Lock()
 		c := l.clusters[clusterID]
@@ -366,7 +378,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		if !moved {
 			next = append(next, lease.Entry{Kind: kind, ID: id, Replica: replica, Member: ans.Member, Slug: b.Stack.Slug})
 		}
-		order := lease.Order{Cluster: clusterID, Member: ans.Member, Epoch: c.epoch, Placement: next, Start: l.startOrder(b), Return: c.returning[ans.Member]}
+		order := lease.Order{Cluster: clusterID, Member: ans.Member, Epoch: c.epoch, Placement: c.orderPlacement(next), Start: l.startOrder(b), Return: c.returning[ans.Member]}
 		fp := target.Fingerprint
 		l.mu.Unlock()
 
@@ -380,7 +392,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		entry.Kind, entry.ID, entry.Replica = kind, id, replica
 		entry.Member = ans.Member
-		l.commit(clusterID, entry, placement.Needed(w), from, b.Restore)
+		l.commit(clusterID, entry, placement.Needed(w), from, b.Restore, false)
 		return outcome{member: ans.Member}
 	}
 	return outcome{refusal: &placement.Refusal{Reason: "start_failed", NeededMB: placement.Needed(placement.Workload{LimitMB: meta.LimitMB, PeakMB: meta.PeakMB}), Cluster: clusterID, Workload: id}}
@@ -392,7 +404,7 @@ func canRestore(r *bundles.Restore, m *member) bool {
 }
 
 // commit records where a workload now runs, takes its memory off that member and tells the control plane.
-func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string, restored *bundles.Restore) {
+func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string, restored *bundles.Restore, promoted bool) {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil {
@@ -419,8 +431,12 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 		a.BackupID, a.BackupAt = restored.BackupID, restored.TakenAt
 		moved["backupId"], moved["backupAt"] = restored.BackupID, restored.TakenAt
 	}
+	if promoted {
+		a.Promoted, moved["promoted"] = true, true
+	}
 	c.auth[key] = a
 	delete(c.waiting, key)
+	c.standbys = c.keptStandbys(c.standbys)
 	members := replicaMembers(c.placement, e.Kind, e.ID)
 	epoch := c.epoch
 	l.saveFailover()
@@ -539,8 +555,8 @@ func (l *Leader) Failover(ctx context.Context) {
 			}
 			var es []lease.Entry
 			for _, e := range c.placement {
-				// A single-writer workload moves only onto a backup another member can read; else it waits for its member.
-				if e.Member == mid && (!e.SingleWriter || l.restorable(id, e, mid)) {
+				// A single-writer workload moves only onto a standby copy or a backup another member can read; else it waits.
+				if e.Member == mid && (!e.SingleWriter || l.restorable(id, e, mid) || l.promotable(c, id, e, mid, now)) {
 					es = append(es, e)
 				}
 			}
@@ -648,7 +664,7 @@ func (l *Leader) Drain(ctx context.Context) {
 		}
 		for _, m := range c.members {
 			c.extended[m.ID] = until
-			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: append([]lease.Entry(nil), c.placement...), ExtendSeconds: int(lease.ExtendFor / time.Second), Return: c.returning[m.ID]}})
+			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: c.orderPlacement(c.placement), ExtendSeconds: int(lease.ExtendFor / time.Second), Return: c.returning[m.ID]}})
 		}
 	}
 	l.saveFailover()

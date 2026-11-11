@@ -66,9 +66,11 @@ type member struct {
 }
 
 type cluster struct {
-	epoch      uint64
-	members    map[string]*member
-	placement  []lease.Entry
+	epoch     uint64
+	members   map[string]*member
+	placement []lease.Entry
+	// standbys are the copies that follow a workload from another member: never moved, promoted at most.
+	standbys   []lease.Entry
 	superseded bool
 	// moved marks a silent member whose workloads were already dealt with, until it answers again.
 	moved map[string]bool
@@ -94,6 +96,8 @@ type authority struct {
 	// BackupID and BackupAt name the backup a moved workload was restored from.
 	BackupID string `json:"backupId,omitempty"`
 	BackupAt string `json:"backupAt,omitempty"`
+	// Promoted is a move that promoted the workload's standby copy and restored nothing.
+	Promoted bool `json:"promoted,omitempty"`
 }
 
 // Leader serves every cluster whose roster the control plane pushed.
@@ -153,6 +157,8 @@ type Roster struct {
 	Epoch     uint64        `json:"epoch"`
 	Members   []Member      `json:"members"`
 	Placement []lease.Entry `json:"placement"`
+	// Standbys are the standby copies, each on another member than its workload; an older leader ignores them.
+	Standbys []lease.Entry `json:"standbys,omitempty"`
 }
 
 // SetRoster replaces a cluster's members and placement. An epoch older than the one held is refused, and a
@@ -192,6 +198,7 @@ func (l *Leader) SetRoster(r Roster) error {
 		next[m.ID] = &member{Member: m, lastAck: now, state: lease.OK}
 	}
 	c.members, c.placement = next, l.reconcilePlacement(c, r.Placement)
+	c.standbys = c.keptStandbys(r.Standbys)
 	if again || c.epoch == 0 {
 		l.adoptWaiting(c, now)
 	}
@@ -267,7 +274,7 @@ func (l *Leader) Tick(ctx context.Context) {
 			continue
 		}
 		for _, m := range c.members {
-			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: append([]lease.Entry(nil), c.placement...), Return: c.returning[m.ID]}})
+			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: c.orderPlacement(c.placement), Return: c.returning[m.ID]}})
 		}
 	}
 	l.mu.Unlock()
@@ -417,6 +424,8 @@ type Move struct {
 	// BackupID and BackupAt name the backup the workload was restored from, when it was.
 	BackupID string `json:"backupId,omitempty"`
 	BackupAt string `json:"backupAt,omitempty"`
+	// Promoted says the workload's standby copy was promoted instead.
+	Promoted bool `json:"promoted,omitempty"`
 }
 
 // Snapshot is the whole truth now, for the control plane to reconcile against after a replay.
@@ -438,7 +447,7 @@ func (l *Leader) Snapshot() Snapshot {
 		sort.Slice(v.Members, func(i, j int) bool { return v.Members[i].ID < v.Members[j].ID })
 		v.Moves = []Move{}
 		for _, a := range c.auth {
-			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq, BackupID: a.BackupID, BackupAt: a.BackupAt})
+			v.Moves = append(v.Moves, Move{Entry: a.Entry, From: a.From, Reason: a.Reason, Seq: a.Seq, BackupID: a.BackupID, BackupAt: a.BackupAt, Promoted: a.Promoted})
 		}
 		sort.Slice(v.Moves, func(i, j int) bool {
 			a, b := v.Moves[i], v.Moves[j]
