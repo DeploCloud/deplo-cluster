@@ -56,6 +56,16 @@ type Restore struct {
 	Request json.RawMessage `json:"request"`
 }
 
+// Keep is where a member that comes back saves what it still held of the workload, before it removes it.
+type Keep struct {
+	// Ref is the control plane's name for the destination, said back with what was saved.
+	Ref string `json:"ref"`
+	// StoreMember is the member whose disk the destination is on; empty is a bucket every member reaches.
+	StoreMember string `json:"storeMember,omitempty"`
+	// Request is the agent's own backup request as JSON, credentials included; the leader passes it on unread.
+	Request json.RawMessage `json:"request"`
+}
+
 // RegistryAuth is a registry login a pulled image needs again.
 type RegistryAuth struct {
 	Host     string `json:"host"`
@@ -101,6 +111,8 @@ type Bundle struct {
 	Restore *Restore `json:"restore,omitempty"`
 	// Promote is set while the workload keeps a standby copy: a failover promotes it instead of restoring.
 	Promote *Promote `json:"promote,omitempty"`
+	// Keep is set for a workload that keeps data and has a destination for it.
+	Keep *Keep `json:"keep,omitempty"`
 }
 
 // Held is one stored bundle as the list shows it.

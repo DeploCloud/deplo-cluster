@@ -19,7 +19,7 @@ type Stopped struct {
 // it, and once it reports what it removed, one event says so. The caller holds l.mu and runs the result after.
 func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) func() {
 	c := l.clusters[clusterID]
-	if c == nil || (!c.moved[memberID] && !c.returning[memberID]) {
+	if c == nil || !c.owesReturn(memberID) {
 		return func() {}
 	}
 	var back []lease.Entry
@@ -44,6 +44,8 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 			return entryKey(back[i].Kind, back[i].ID, back[i].Replica) < entryKey(back[j].Kind, back[j].ID, back[j].Replica)
 		})
 	}
+	// A leader that restarted since it moved this member's work still owes it the question.
+	c.returning[memberID] = true
 	type placed struct {
 		kind, id string
 		members  []string
@@ -53,6 +55,7 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 		told = append(told, placed{e.Kind, e.ID, replicaMembers(c.placement, e.Kind, e.ID)})
 	}
 	var stopped []Stopped
+	var data map[string]any
 	if report != nil {
 		delete(c.returning, memberID)
 		stopped = []Stopped{}
@@ -63,6 +66,16 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 				}
 			}
 		}
+		data = map[string]any{"member": memberID, "stopped": stopped}
+		if saved, kept := c.savedAndKept(memberID, report); len(saved)+len(kept) > 0 {
+			if len(saved) > 0 {
+				data["saved"] = saved
+			}
+			if len(kept) > 0 {
+				data["kept"] = kept
+			}
+		}
+		delete(c.left, memberID)
 	}
 	epoch := c.epoch
 	l.saveFailover()
@@ -70,8 +83,8 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 		for _, p := range told {
 			l.log.Append("placement", clusterID, map[string]any{"kind": p.kind, "workloadId": p.id, "members": p.members, "epoch": epoch})
 		}
-		if stopped != nil {
-			l.log.Append("member_returned", clusterID, map[string]any{"member": memberID, "stopped": stopped})
+		if data != nil {
+			l.log.Append("member_returned", clusterID, data)
 		}
 	}
 }

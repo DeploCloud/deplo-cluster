@@ -76,6 +76,9 @@ type cluster struct {
 	moved map[string]bool
 	// returning marks a member that came back from that, until it has said what it removed.
 	returning map[string]bool
+	// left is, per member, the single-writer workloads that moved off it and when, until it has said what it
+	// did with its copies: what it is told to save, and the time its backups are labelled with.
+	left map[string]map[string]time.Time
 	// waiting is what found no room, retried every RetryEvery; auth is where the leader put a workload until
 	// the control plane's picture agrees, so a roster that has not seen the move yet cannot undo it.
 	waiting map[string]*Waiting
@@ -204,6 +207,11 @@ func (l *Leader) SetRoster(r Roster) error {
 		}
 		next[m.ID] = &member{Member: m, lastAck: now, state: lease.OK}
 	}
+	for id := range c.left {
+		if next[id] == nil {
+			delete(c.left, id)
+		}
+	}
 	c.members, c.placement = next, l.reconcilePlacement(c, r.Placement)
 	c.standbys = c.keptStandbys(r.Standbys)
 	if again || c.epoch == 0 {
@@ -309,7 +317,7 @@ func (l *Leader) Tick(ctx context.Context) {
 			continue
 		}
 		for _, m := range c.members {
-			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: c.orderPlacement(c.placement), Return: c.returning[m.ID]}})
+			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: c.orderPlacement(c.placement), Return: c.owesReturn(m.ID)}})
 		}
 	}
 	l.mu.Unlock()
@@ -335,6 +343,10 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(sendTimeout))
+	if o.Return {
+		// Opened only for a member that answers: a keep carries its destination's credentials.
+		o.Keep = l.keepsFor(clusterID, m.ID)
+	}
 	r, err := lease.Send(c, o)
 	if err != nil {
 		return
