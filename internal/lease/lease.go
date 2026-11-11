@@ -22,7 +22,8 @@ const (
 	StartTimeout = 5 * time.Minute
 	// RestoreTimeout is how long a start that restores a backup first may take.
 	RestoreTimeout = StartTimeout + 30*time.Minute
-	// ExtendFor is how long a planned restart of the leader buys every member.
+	// ExtendFor is how long a planned restart of the leader buys every member, and the most a member honours.
+	// A leader waits it out for a member it never heard, so raise it here first and in deplo-agent last.
 	ExtendFor = 5 * time.Minute
 )
 

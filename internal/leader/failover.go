@@ -602,18 +602,28 @@ func (l *Leader) Failover(ctx context.Context) {
 		}
 		sort.Strings(mids)
 		for _, mid := range mids {
+			m := c.members[mid]
 			// A lease extended before a restart may still be alive on a member this leader has not heard since.
-			if now.Sub(c.members[mid].lastAck) < FailoverAfter || c.moved[mid] || now.Before(c.extended[mid].Add(FailoverAfter-lease.FenceAfter)) {
+			if now.Sub(m.lastAck) < FailoverAfter || now.Before(c.extended[mid].Add(FailoverAfter-lease.FenceAfter)) {
+				continue
+			}
+			// A member this leader never heard may hold a lease another leader extended: what must never run
+			// twice waits that out, and moves in a second pass once it has.
+			held := m.presumedAlive(now)
+			if c.moved[mid] && (held || m.presumed.IsZero()) {
 				continue
 			}
 			var es []lease.Entry
 			for _, e := range c.placement {
 				// A single-writer workload moves only onto a standby copy or a backup another member can read; else it waits.
-				if e.Member == mid && (!e.SingleWriter || l.restorable(id, e, mid) || l.promotable(c, id, e, mid, now)) {
+				if e.Member == mid && (!e.SingleWriter || (!held && (l.restorable(id, e, mid) || l.promotable(c, id, e, mid, now)))) {
 					es = append(es, e)
 				}
 			}
 			c.moved[mid] = true
+			if !held {
+				m.presumed = time.Time{}
+			}
 			jobs = append(jobs, failoverJob{id, mid, es})
 		}
 		keys := make([]string, 0, len(c.waiting))
@@ -638,6 +648,11 @@ func (l *Leader) Failover(ctx context.Context) {
 	for _, m := range moves {
 		l.runMove(ctx, m)
 	}
+}
+
+// presumedAlive says whether a lease another leader gave this member may still be running, margin included.
+func (m *member) presumedAlive(now time.Time) bool {
+	return now.Before(m.presumed.Add(FailoverAfter - lease.FenceAfter))
 }
 
 // restorable says whether the workload's bundle names a backup that did not go down with its member.

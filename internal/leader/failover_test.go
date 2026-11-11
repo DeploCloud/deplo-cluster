@@ -46,6 +46,8 @@ func startFO(t *testing.T, mem map[string]leader.Member) *fo {
 	if err := f.l.SetRoster(r); err != nil {
 		t.Fatal(err)
 	}
+	// Every member has answered this leader once: one that never did is takeover_test.go's subject.
+	f.l.Tick(context.Background())
 	return f
 }
 

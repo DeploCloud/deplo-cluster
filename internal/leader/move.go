@@ -58,7 +58,7 @@ func (c *cluster) leftBy(kind, id string, now time.Time) (from, why string) {
 		}
 		return from, ""
 	}
-	if m := c.members[from]; m != nil && (now.Sub(m.lastAck) < FailoverAfter || now.Before(c.extended[from].Add(FailoverAfter-lease.FenceAfter))) {
+	if m := c.members[from]; m != nil && (now.Sub(m.lastAck) < FailoverAfter || m.presumedAlive(now) || now.Before(c.extended[from].Add(FailoverAfter-lease.FenceAfter))) {
 		return from, StillAnswering
 	}
 	return from, ""
