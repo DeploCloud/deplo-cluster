@@ -51,10 +51,21 @@ type members struct {
 	restoreTakes time.Duration
 	// slow is how long a member's plain renewal takes to reach it.
 	slow map[string]time.Duration
+	// now is the test's clock; renewed and extra are the lease each member holds: when it took it and what it added.
+	now     func() time.Time
+	renewed map[string]time.Time
+	extra   map[string]int
+}
+
+// leaseEnd is when the lease a member holds runs out, as its agent counts it.
+func (m *members) leaseEnd(fp string) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.renewed[fp].Add(lease.FenceAfter + time.Duration(m.extra[fp])*time.Second)
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -87,9 +98,14 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 		r := lease.Reply{OK: true}
 		if o.Epoch < held {
 			r = lease.Reply{Error: lease.StaleEpoch, Epoch: held}
+		} else if o.Probe {
+			m.epoch[to.Fingerprint] = o.Epoch
 		} else {
 			m.epoch[to.Fingerprint] = o.Epoch
 			m.orders[to.Fingerprint] = append(m.orders[to.Fingerprint], o)
+			if m.now != nil {
+				m.renewed[to.Fingerprint], m.extra[to.Fingerprint] = m.now(), o.ExtendSeconds
+			}
 			if o.Return {
 				r.Returned = m.returned[to.Fingerprint]
 			}
@@ -184,6 +200,8 @@ func TestSilentMemberIsNotRespondingAt15sAndFencedAt60sAndBackWhenItAnswers(t *t
 		{5 * time.Second, "fenced"},         // 60 s
 	} {
 		clk.Add(step.advance)
+		// Deplo is up: with one of two members silent, its word is what lets the leader go on renewing the other.
+		l.Beat(leader.Beat{Epochs: map[string]uint64{"clu_1": 1}})
 		l.Tick(ctx)
 		if got := states(t, l)["srv_b"]; got != step.want {
 			t.Fatalf("after %v more: srv_b is %s, want %s", step.advance, got, step.want)

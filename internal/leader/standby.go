@@ -70,7 +70,7 @@ func (l *Leader) standbyFor(clusterID, kind, id, from string) string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	c := l.clusters[clusterID]
-	if c == nil || c.superseded {
+	if c == nil || !c.leads(l.cfg.Now()) {
 		return ""
 	}
 	return c.standbyOn(kind, id, from, l.cfg.Now())
@@ -80,7 +80,7 @@ func (l *Leader) standbyFor(clusterID, kind, id, from string) string {
 func (l *Leader) promote(ctx context.Context, clusterID, kind, id string, replica int, from, to string, b bundles.Bundle) bool {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
-	if c == nil || c.superseded || c.members[to] == nil {
+	if c == nil || !c.leads(l.cfg.Now()) || c.members[to] == nil {
 		l.mu.Unlock()
 		return false
 	}

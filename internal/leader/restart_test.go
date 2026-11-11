@@ -11,12 +11,17 @@ import (
 
 // restart is the leader's process ending and a new one starting on the same state directory.
 func (f *fo) restart() {
-	f.l = leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }})
+	f.l = leader.New(leader.Config{Dial: f.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }})
 }
 
 func snapshotRoster(f *fo, epoch uint64) leader.Roster {
-	r := staleRoster("srv_a", "srv_b")
-	r.Epoch, r.Placement = epoch, f.l.Snapshot().Clusters["clu_1"].Placement
+	now := f.l.Snapshot().Clusters["clu_1"]
+	var ids []string
+	for _, m := range now.Members {
+		ids = append(ids, m.ID)
+	}
+	r := staleRoster(ids...)
+	r.Epoch, r.Placement = epoch, now.Placement
 	return r
 }
 

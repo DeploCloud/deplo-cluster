@@ -72,6 +72,9 @@ type Order struct {
 	Placement []Entry `json:"placement"`
 	// ExtendSeconds adds to the time this lease lives without the next renewal: a leader about to restart sends it.
 	ExtendSeconds int `json:"extendSeconds,omitempty"`
+	// Probe only asks whether the member takes this epoch. It renews nothing and tells the member nothing else,
+	// and a member that answers refuses every older epoch from then on.
+	Probe bool `json:"probe,omitempty"`
 	// Start asks the member to bring one moved workload up from its failover bundle.
 	Start *Start `json:"start,omitempty"`
 	// Return asks a member that was presumed dead what it removed; sent until it answers with Returned.

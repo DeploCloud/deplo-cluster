@@ -365,7 +365,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 	for try := 0; try < maxStartTries; try++ {
 		l.mu.Lock()
 		c := l.clusters[clusterID]
-		if c == nil || c.superseded {
+		if c == nil || !c.leads(l.cfg.Now()) {
 			l.mu.Unlock()
 			return outcome{skipped: true, why: NotLeading}
 		}
@@ -584,7 +584,7 @@ func (l *Leader) Failover(ctx context.Context) {
 	sort.Strings(ids)
 	for _, id := range ids {
 		c := l.clusters[id]
-		if c.superseded {
+		if !c.leads(now) {
 			continue
 		}
 		silent := 0
@@ -720,42 +720,14 @@ func (l *Leader) retry(ctx context.Context, r retryJob) {
 }
 
 // Drain extends every member's lease before a planned restart, so the members do not stop their single-writer
-// workloads while this leader is away. It returns once each member answered or the context ended.
+// workloads while this leader is away. It asks a quorum again first: a leader that was replaced extends nothing.
 func (l *Leader) Drain(ctx context.Context) {
-	type job struct {
-		cluster string
-		m       *member
-		order   lease.Order
-	}
-	var jobs []job
 	l.tickMu.Lock()
 	defer l.tickMu.Unlock()
 	l.mu.Lock()
-	// Kept before the order leaves: a member that took it and whose answer was lost is extended all the same.
-	until := l.cfg.Now().Add(lease.FenceAfter + lease.ExtendFor)
-	for id, c := range l.clusters {
-		if c.superseded {
-			continue
-		}
-		for _, m := range c.members {
-			c.extended[m.ID] = until
-			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: c.orderPlacement(c.placement), ExtendSeconds: int(lease.ExtendFor / time.Second), Return: c.returning[m.ID]}})
-		}
+	for _, c := range l.clusters {
+		c.sure = time.Time{}
 	}
-	l.saveFailover()
 	l.mu.Unlock()
-	done := make(chan struct{}, len(jobs))
-	for _, j := range jobs {
-		go func() {
-			l.renew(ctx, j.cluster, j.m, j.order)
-			done <- struct{}{}
-		}()
-	}
-	for range jobs {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return
-		}
-	}
+	l.round(ctx, lease.ExtendFor)
 }

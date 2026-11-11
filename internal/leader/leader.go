@@ -24,6 +24,12 @@ var ErrOlderEpoch = errors.New("the leader holds a newer epoch")
 
 const (
 	sendTimeout = 4 * time.Second
+	// SureFor is how long a round that a quorum answered lets this leader send orders without asking again:
+	// two renewals, so one slow member does not make it ask every time.
+	SureFor = 2 * lease.RenewEvery
+	// DeploFor is how long the control plane's last beat breaks a tie for a leader that hears exactly half of
+	// its members. Deplo waits longer than this before it lets another leader lead.
+	DeploFor = 20 * time.Second
 	// MaxEvents is how many events are kept for a control plane that is away.
 	MaxEvents = 5000
 )
@@ -89,6 +95,24 @@ type cluster struct {
 	extended map[string]time.Time
 	// roster is the last one pushed, kept so a restarted leader serves its cluster before Deplo is back.
 	roster Roster
+	// sure is when the last round began that a quorum answered at this epoch, and heard how many did.
+	sure  time.Time
+	heard int
+	// deplo is when the control plane last named this epoch to this leader.
+	deplo time.Time
+}
+
+// quorum says whether that many members answering let this leader lead: more than half of them, or exactly
+// half while the control plane names its epoch. The other half's leader has no such word, so only one leads.
+func (c *cluster) quorum(heard int, now time.Time) bool {
+	n := len(c.members)
+	return heard*2 > n || (heard > 0 && heard*2 == n && now.Sub(c.deplo) < DeploFor)
+}
+
+// leads says this leader may renew, extend and move: a quorum took its epoch within SureFor. One that may
+// have been replaced without hearing of it does none of the three (spec #176, never two writers).
+func (c *cluster) leads(now time.Time) bool {
+	return !c.superseded && now.Sub(c.sure) < SureFor && c.quorum(c.heard, now)
 }
 
 type authority struct {
@@ -198,6 +222,7 @@ func (l *Leader) SetRoster(r Roster) error {
 	again := c.epoch != 0 && r.Epoch > c.epoch
 	if again {
 		c.auth, c.waiting, c.moved = map[string]authority{}, map[string]*Waiting{}, map[string]bool{}
+		c.sure, c.deplo = time.Time{}, time.Time{}
 	}
 	now := l.cfg.Now()
 	next := map[string]*member{}
@@ -259,6 +284,34 @@ func (l *Leader) Forget(clusterID string) error {
 	return nil
 }
 
+// Beat is the control plane saying, every few seconds, at which epoch each cluster is led.
+type Beat struct {
+	Epochs map[string]uint64 `json:"epochs"`
+}
+
+// Beat notes the control plane's word for the clusters led here at that epoch. A newer epoch means another
+// leader was handed the cluster: this one stops, and leads again only from a roster at least that new.
+func (l *Leader) Beat(b Beat) {
+	now := l.cfg.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id, epoch := range b.Epochs {
+		c := l.clusters[id]
+		switch {
+		case c == nil || epoch < c.epoch:
+		case epoch == c.epoch:
+			c.deplo = now
+		case !c.superseded:
+			c.superseded = true
+			if epoch > l.epochs[id] {
+				l.epochs[id] = epoch
+				l.saveEpochs()
+			}
+			l.cfg.Logf("deplo-cluster: cluster %s is led at epoch %d now, newer than %d: stepping down", id, epoch, c.epoch)
+		}
+	}
+}
+
 // Assign records where the leader put one workload and tells the control plane.
 type Assign struct {
 	Cluster      string   `json:"cluster"`
@@ -301,47 +354,102 @@ func (l *Leader) Assign(a Assign) error {
 
 // Tick renews every member's lease once, then reports each member whose state changed.
 func (l *Leader) Tick(ctx context.Context) {
-	type job struct {
-		cluster string
-		m       *member
-		order   lease.Order
-	}
-	var jobs []job
 	l.tickMu.Lock()
 	defer l.tickMu.Unlock()
 	// Told to stop: the drain's longer lease is the last order, and a dial does not look at a cancelled context.
 	if ctx.Err() != nil {
 		return
 	}
+	l.round(ctx, 0)
+	l.settle()
+}
+
+// round asks the members of every cluster this leader is not sure it leads, then sends its orders where a
+// quorum answered. extend is the longer lease of a drain; the caller holds l.tickMu.
+func (l *Leader) round(ctx context.Context, extend time.Duration) {
+	l.exchange(ctx, true, 0)
+	l.exchange(ctx, false, extend)
+}
+
+// exchange sends one order to every member of the clusters that are due it: a probe where this leader is not
+// sure it leads, a renewal where it is. A quorum of answers makes it sure for SureFor.
+func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration) {
+	type job struct {
+		cluster string
+		m       *member
+		order   lease.Order
+	}
+	var jobs []job
+	epochs := map[string]uint64{}
+	now := l.cfg.Now()
 	l.mu.Lock()
 	for id, c := range l.clusters {
-		if c.superseded {
+		if c.superseded || c.leads(now) == probe {
 			continue
 		}
+		epochs[id] = c.epoch
 		for _, m := range c.members {
-			jobs = append(jobs, job{id, m, lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Placement: c.orderPlacement(c.placement), Return: c.owesReturn(m.ID)}})
+			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe}
+			if !probe {
+				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.placement), c.owesReturn(m.ID), int(extend/time.Second)
+			}
+			if extend > 0 {
+				// Kept before the order leaves: a member that took it and whose answer was lost is extended all the same.
+				c.extended[m.ID] = now.Add(lease.FenceAfter + extend)
+			}
+			jobs = append(jobs, job{id, m, o})
 		}
+	}
+	if extend > 0 {
+		l.saveFailover()
 	}
 	l.mu.Unlock()
 
+	answered := make(chan string, len(jobs))
 	var wg sync.WaitGroup
 	for _, j := range jobs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			l.renew(ctx, j.cluster, j.m, j.order)
+			if l.renew(ctx, j.cluster, j.m, j.order) {
+				answered <- j.cluster
+			}
 		}()
 	}
 	wg.Wait()
-	l.settle()
+	close(answered)
+	heard := map[string]int{}
+	for id := range answered {
+		heard[id]++
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id, n := range heard {
+		c := l.clusters[id]
+		if c == nil || c.superseded || c.epoch != epochs[id] || !c.quorum(n, now) {
+			continue
+		}
+		c.sure, c.heard = now, n
+		if !probe {
+			continue
+		}
+		// It was not sure until now, so an older leader may have extended a lease meanwhile: a member this one
+		// never heard holds the longest one again, counted as from a roster one renewal before this round.
+		for _, m := range c.members {
+			if at := now.Add(lease.FenceAfter + lease.ExtendFor - lease.RenewEvery); !m.presumed.IsZero() && m.presumed.Before(at) {
+				m.presumed = at
+			}
+		}
+	}
 }
 
-func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease.Order) {
+// renew sends one order and says whether the member took it at this leader's epoch.
+func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease.Order) bool {
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
 	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: m.Fingerprint, Role: wire.RoleMember})
 	if err != nil {
-		return
+		return false
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(sendTimeout))
@@ -351,7 +459,7 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	}
 	r, err := lease.Send(c, o)
 	if err != nil {
-		return
+		return false
 	}
 	if r.Error == lease.StaleEpoch {
 		l.mu.Lock()
@@ -371,23 +479,26 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 			l.cfg.Logf("deplo-cluster: member %s holds epoch %d, newer than %d: stepping down", m.ID, r.Epoch, o.Epoch)
 			l.log.Append("superseded", clusterID, map[string]uint64{"epoch": r.Epoch})
 		}
-		return
+		return false
 	}
-	if r.OK {
-		l.mu.Lock()
-		m.lastAck = l.cfg.Now()
-		// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
-		if o.ExtendSeconds == 0 {
-			m.presumed = time.Time{}
-		}
-		if cl := l.clusters[clusterID]; cl != nil && o.ExtendSeconds == 0 && !cl.extended[m.ID].IsZero() {
-			delete(cl.extended, m.ID)
-			l.saveFailover()
-		}
-		tell := l.cameBack(clusterID, m.ID, r.Returned)
-		l.mu.Unlock()
-		tell()
+	// A probe renewed nothing: the member's lease is as old as it was.
+	if !r.OK || o.Probe {
+		return r.OK
 	}
+	l.mu.Lock()
+	m.lastAck = l.cfg.Now()
+	// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
+	if o.ExtendSeconds == 0 {
+		m.presumed = time.Time{}
+	}
+	if cl := l.clusters[clusterID]; cl != nil && o.ExtendSeconds == 0 && !cl.extended[m.ID].IsZero() {
+		delete(cl.extended, m.ID)
+		l.saveFailover()
+	}
+	tell := l.cameBack(clusterID, m.ID, r.Returned)
+	l.mu.Unlock()
+	tell()
+	return true
 }
 
 // settle moves every member to the state its silence earns and records the changes, in cluster and member order.
