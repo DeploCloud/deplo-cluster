@@ -65,6 +65,8 @@ type Stack struct {
 	RegistryAuth  []RegistryAuth    `json:"registryAuth"`
 	ComposeUpArgs []string          `json:"composeUpArgs"`
 	TunnelToken   string            `json:"tunnelToken,omitempty"`
+	// Scale is the text in ComposeYAML that stands for the replica count; set, each replica is placed on its own.
+	Scale string `json:"scale,omitempty"`
 	// Ready and RestartRule are the deploy's own messages as JSON; the leader passes them on unread.
 	Ready            json.RawMessage `json:"ready,omitempty"`
 	RestartRule      json.RawMessage `json:"restartRule,omitempty"`

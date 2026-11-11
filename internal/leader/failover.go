@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/DeploCloud/deplo-cluster/internal/bundles"
@@ -188,6 +191,9 @@ type PlaceRequest struct {
 	Cluster  string             `json:"cluster"`
 	Workload placement.Workload `json:"workload"`
 	Members  []placement.Member `json:"members"`
+	// Replicas asks for that many, spread across members; Current is where each ordinal runs now.
+	Replicas int      `json:"replicas,omitempty"`
+	Current  []string `json:"current,omitempty"`
 }
 
 // Place answers with a member or a structured refusal; a member that is not leased by this leader is never chosen.
@@ -211,6 +217,9 @@ func (l *Leader) Place(r PlaceRequest) (placement.Answer, error) {
 			}
 			facts[i] = f
 		}
+	}
+	if r.Replicas > 0 {
+		return c.spread(r, facts), nil
 	}
 	return placement.Place(r.Cluster, r.Workload, facts), nil
 }
@@ -343,6 +352,13 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 			l.mu.Unlock()
 			return outcome{skipped: true}
 		}
+		// Replicas kept on one member move as one stack: the first is started, the rest follow it.
+		spread := b.Stack.Scale != ""
+		if to := sibling(c.placement, kind, id, replica, from); to != "" && !spread {
+			l.mu.Unlock()
+			l.follow(clusterID, lease.Entry{Kind: kind, ID: id, Replica: replica, Member: to, Slug: b.Stack.Slug}, from)
+			return outcome{member: to}
+		}
 		var facts []placement.Member
 		for _, f := range c.memberFacts(l.cfg.Now()) {
 			if f.ID != from && !exclude[f.ID] && !c.members[f.ID].NoFailover && canRestore(b.Restore, c.members[f.ID]) {
@@ -350,6 +366,9 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 			}
 		}
 		w := placement.Workload{Kind: kind, ID: id, Name: meta.Name, Environment: meta.Environment, Image: meta.Image, Archs: meta.Archs, LimitMB: meta.LimitMB, PeakMB: meta.PeakMB}
+		if n := countOn(c.placement, kind, id, ""); n > 1 && !spread {
+			w.LimitMB = placement.Needed(w) * n
+		}
 		ans := placement.Place(clusterID, w, facts)
 		if ans.Refusal != nil {
 			l.mu.Unlock()
@@ -367,6 +386,9 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 			next = append(next, lease.Entry{Kind: kind, ID: id, Replica: replica, Member: ans.Member, Slug: b.Stack.Slug})
 		}
 		order := lease.Order{Cluster: clusterID, Member: ans.Member, Epoch: c.epoch, Placement: next, Start: l.startOrder(b), Return: c.returning[ans.Member]}
+		if spread {
+			order.Start.ComposeYAML = strings.ReplaceAll(order.Start.ComposeYAML, b.Stack.Scale, strconv.Itoa(countOn(next, kind, id, ans.Member)))
+		}
 		fp := target.Fingerprint
 		l.mu.Unlock()
 
@@ -596,8 +618,10 @@ func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 		case o.skipped:
 		case o.refusal != nil:
 			l.wait(j.cluster, e, j.from, StoppedAnswering)
-			waiting = append(waiting, left{e.Kind, e.ID, string(o.refusal.Reason), o.refusal.NeededMB})
-		default:
+			if !slices.ContainsFunc(waiting, func(w left) bool { return w.Kind == e.Kind && w.ID == e.ID }) {
+				waiting = append(waiting, left{e.Kind, e.ID, string(o.refusal.Reason), o.refusal.NeededMB})
+			}
+		case !slices.Contains(moved, e.ID):
 			moved = append(moved, e.ID)
 		}
 	}

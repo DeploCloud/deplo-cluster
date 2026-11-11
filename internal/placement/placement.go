@@ -56,6 +56,8 @@ type Refusal struct {
 type Answer struct {
 	Member  string   `json:"member,omitempty"`
 	Refusal *Refusal `json:"refusal,omitempty"`
+	// Members answers a request for several replicas, one per ordinal; empty is one still waiting for room.
+	Members []string `json:"members,omitempty"`
 }
 
 // Needed is the memory limit, else the 24-hour peak, never below MinMB.
@@ -133,4 +135,63 @@ func Place(cluster string, w Workload, members []Member) Answer {
 		return a.ID < b.ID
 	})
 	return Answer{Member: fit[0].ID}
+}
+
+// Spread places n replicas of w, each on a member running none of the others while one is left. A replica stays
+// where current says it runs, and one doubled up on a member moves only to a member that has none.
+func Spread(cluster string, w Workload, members []Member, n int, current []string) ([]string, *Refusal) {
+	facts := make([]Member, len(members))
+	at := map[string]int{}
+	for i, m := range members {
+		m.Placed = append([]string(nil), m.Placed...)
+		for j := 0; j < len(m.Placed); j++ {
+			if m.Placed[j] == w.ID {
+				m.Placed = append(m.Placed[:j], m.Placed[j+1:]...)
+				j--
+			}
+		}
+		facts[i], at[m.ID] = m, i
+	}
+	runs := func(i int) string {
+		if i < len(current) {
+			if j, ok := at[current[i]]; ok && facts[j].Online && facts[j].Leased && !facts[j].Emptying {
+				return current[i]
+			}
+		}
+		return ""
+	}
+	out := make([]string, n)
+	take := func(i int, id string) {
+		out[i] = id
+		facts[at[id]].Placed = append(facts[at[id]].Placed, w.ID)
+	}
+	for i := range out {
+		if id := runs(i); id != "" && !has(facts[at[id]].Placed, w.ID) {
+			take(i, id)
+		}
+	}
+	for i := range out {
+		if out[i] != "" {
+			continue
+		}
+		var none []Member
+		for _, m := range facts {
+			if !has(m.Placed, w.ID) {
+				none = append(none, m)
+			}
+		}
+		ans := Place(cluster, w, none)
+		if ans.Member == "" {
+			if id := runs(i); id != "" {
+				take(i, id)
+				continue
+			}
+			if ans = Place(cluster, w, facts); ans.Refusal != nil {
+				return nil, ans.Refusal
+			}
+		}
+		take(i, ans.Member)
+		facts[at[ans.Member]].FreeMB -= Needed(w)
+	}
+	return out, nil
 }
