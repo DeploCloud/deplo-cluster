@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/DeploCloud/deplo-cluster/internal/bundles"
 	"github.com/DeploCloud/deplo-cluster/internal/leader"
 	"github.com/DeploCloud/deplo-cluster/internal/lease"
+	"github.com/DeploCloud/deplo-cluster/internal/wire"
 )
 
 type fo struct {
@@ -22,19 +25,40 @@ type fo struct {
 	store  *bundles.Store
 	pathOK bool
 	dir    string
+	// blind are the members a split keeps this leader from, by id; they are alive all the same.
+	blind map[string]bool
+	// away is Deplo down, or cut off from this leader: no beat reaches it.
+	away bool
+}
+
+// step is one renewal and one failover pass, after Deplo's beat when Deplo reaches this leader.
+func (f *fo) step() {
+	if v, ok := f.l.Snapshot().Clusters["clu_1"]; ok && !f.away {
+		f.l.Beat(leader.Beat{Epochs: map[string]uint64{"clu_1": v.Epoch}})
+	}
+	f.l.Tick(context.Background())
+	f.l.Failover(context.Background())
+}
+
+func (f *fo) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
+	if f.blind[strings.TrimPrefix(to.Fingerprint, "fp-")] {
+		return nil, errors.New("no relay reaches that party")
+	}
+	return f.ms.dial(ctx, to)
 }
 
 func startFO(t *testing.T, mem map[string]leader.Member) *fo {
 	t.Helper()
-	f := &fo{pathOK: true}
+	f := &fo{pathOK: true, blind: map[string]bool{}}
 	f.clk = &clock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
 	f.ms = newMembers()
+	f.ms.now = f.clk.Now
 	var err error
 	if f.store, err = bundles.Open(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	f.dir = t.TempDir()
-	f.l = leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }})
+	f.l = leader.New(leader.Config{Dial: f.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }})
 	r := leader.Roster{Cluster: "clu_1", Epoch: 1}
 	for _, id := range []string{"srv_a", "srv_b", "srv_c"} {
 		if m, ok := mem[id]; ok {
@@ -47,7 +71,7 @@ func startFO(t *testing.T, mem map[string]leader.Member) *fo {
 		t.Fatal(err)
 	}
 	// Every member has answered this leader once: one that never did is takeover_test.go's subject.
-	f.l.Tick(context.Background())
+	f.step()
 	return f
 }
 
@@ -76,8 +100,7 @@ func (f *fo) assign(t *testing.T, id, slug string, members ...string) {
 func (f *fo) pass(d time.Duration) {
 	for ; d > 0; d -= 5 * time.Second {
 		f.clk.Add(5 * time.Second)
-		f.l.Tick(context.Background())
-		f.l.Failover(context.Background())
+		f.step()
 	}
 }
 

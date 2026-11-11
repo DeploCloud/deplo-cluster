@@ -1,6 +1,7 @@
 package leader
 
 import (
+	"slices"
 	"sort"
 
 	"github.com/DeploCloud/deplo-cluster/internal/lease"
@@ -26,23 +27,7 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 	if c.moved[memberID] {
 		delete(c.moved, memberID)
 		c.returning[memberID] = true
-		for key, w := range c.waiting {
-			if w.From != memberID {
-				continue
-			}
-			for i := range c.placement {
-				p := &c.placement[i]
-				if p.Kind == w.Kind && p.ID == w.ID && p.Replica == w.Replica {
-					p.Member = memberID
-					c.auth[key] = authority{At: l.cfg.Now(), Entry: *p, Reason: Returned}
-					back = append(back, *p)
-				}
-			}
-			delete(c.waiting, key)
-		}
-		sort.Slice(back, func(i, j int) bool {
-			return entryKey(back[i].Kind, back[i].ID, back[i].Replica) < entryKey(back[j].Kind, back[j].ID, back[j].Replica)
-		})
+		back = l.giveBack(c, memberID, func(w *Waiting) bool { return w.From == memberID })
 	}
 	// A leader that restarted since it moved this member's work still owes it the question.
 	c.returning[memberID] = true
@@ -85,6 +70,57 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 		}
 		if data != nil {
 			l.log.Append("member_returned", clusterID, data)
+		}
+	}
+}
+
+// giveBack places on a member every waiting entry that is its own again; the caller holds l.mu.
+func (l *Leader) giveBack(c *cluster, memberID string, its func(*Waiting) bool) []lease.Entry {
+	var back []lease.Entry
+	for key, w := range c.waiting {
+		if !its(w) {
+			continue
+		}
+		for i := range c.placement {
+			p := &c.placement[i]
+			if p.Kind == w.Kind && p.ID == w.ID && p.Replica == w.Replica {
+				p.Member = memberID
+				c.auth[key] = authority{At: l.cfg.Now(), Entry: *p, Reason: Returned}
+				back = append(back, *p)
+			}
+		}
+		delete(c.waiting, key)
+	}
+	sort.Slice(back, func(i, j int) bool {
+		return entryKey(back[i].Kind, back[i].ID, back[i].Replica) < entryKey(back[j].Kind, back[j].ID, back[j].Replica)
+	})
+	return back
+}
+
+// stillHas handles a member naming stacks its order placed nowhere: what waits for room is that member's
+// again, so no second copy starts beside it. The caller holds l.mu and runs the result after.
+func (l *Leader) stillHas(clusterID, memberID string, slugs []string) func() {
+	c := l.clusters[clusterID]
+	if c == nil || len(slugs) == 0 {
+		return func() {}
+	}
+	back := l.giveBack(c, memberID, func(w *Waiting) bool { return w.Slug != "" && slices.Contains(slugs, w.Slug) })
+	if len(back) == 0 {
+		return func() {}
+	}
+	type placed struct {
+		kind, id string
+		members  []string
+	}
+	var told []placed
+	for _, e := range back {
+		told = append(told, placed{e.Kind, e.ID, replicaMembers(c.placement, e.Kind, e.ID)})
+	}
+	epoch := c.epoch
+	l.saveFailover()
+	return func() {
+		for _, p := range told {
+			l.log.Append("placement", clusterID, map[string]any{"kind": p.kind, "workloadId": p.id, "members": p.members, "epoch": epoch})
 		}
 	}
 }

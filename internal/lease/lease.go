@@ -72,6 +72,9 @@ type Order struct {
 	Placement []Entry `json:"placement"`
 	// ExtendSeconds adds to the time this lease lives without the next renewal: a leader about to restart sends it.
 	ExtendSeconds int `json:"extendSeconds,omitempty"`
+	// Probe only asks whether the member takes this epoch. It renews nothing and tells the member nothing else,
+	// and a member that answers refuses every older epoch from then on.
+	Probe bool `json:"probe,omitempty"`
 	// Start asks the member to bring one moved workload up from its failover bundle.
 	Start *Start `json:"start,omitempty"`
 	// Return asks a member that was presumed dead what it removed; sent until it answers with Returned.
@@ -192,6 +195,9 @@ type Reply struct {
 	Epoch    uint64 `json:"epoch,omitempty"`
 	// Returned answers an order's Return once the member is done removing what moved away.
 	Returned *Returned `json:"returned,omitempty"`
+	// Unplaced is the stacks the order placed on no member that this member still has, running or stopped by
+	// itself: what waits for room is handed back to it, never started a second time beside it.
+	Unplaced []string `json:"unplaced,omitempty"`
 }
 
 // ErrStale is a member refusing an older epoch.

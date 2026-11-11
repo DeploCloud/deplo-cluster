@@ -54,6 +54,9 @@ func (c *cluster) leftBy(kind, id string, now time.Time) (from, why string) {
 	}
 	if from == "" {
 		if w := c.waiting[entryKey(kind, id, 0)]; w != nil {
+			if c.mayBeHeld(w, now) {
+				return "", StillAnswering
+			}
 			from = w.From
 		}
 		return from, ""
@@ -68,7 +71,7 @@ func (l *Leader) leftNow(clusterID, kind, id string) (from, why string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	c := l.clusters[clusterID]
-	if c == nil || c.superseded {
+	if c == nil || !c.leads(l.cfg.Now()) {
 		return "", NotLeading
 	}
 	return c.leftBy(kind, id, l.cfg.Now())
@@ -94,7 +97,7 @@ func (l *Leader) Move(r MoveRequest) MoveAnswer {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	c := l.clusters[r.Cluster]
-	if c == nil || c.superseded {
+	if c == nil || !c.leads(l.cfg.Now()) {
 		return no(NotLeading)
 	}
 	if _, why := c.leftBy(r.Kind, r.ID, l.cfg.Now()); why != "" {

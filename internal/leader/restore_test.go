@@ -24,6 +24,15 @@ func backup(storeMember string) *bundles.Restore {
 // putDB hands the leader a database's bundle and places it on srv_a; restore nil is a database with no backup yet.
 func (f *fo) putDB(t *testing.T, id, slug string, restore *bundles.Restore) {
 	t.Helper()
+	f.sealDB(t, id, slug, restore)
+	if err := f.l.Assign(leader.Assign{Cluster: "clu_1", Kind: "database", ID: id, Slug: slug, SingleWriter: true, Members: []string{"srv_a"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sealDB hands the leader a database's bundle and places nothing.
+func (f *fo) sealDB(t *testing.T, id, slug string, restore *bundles.Restore) {
+	t.Helper()
 	rec, _ := age.ParseX25519Recipient(f.store.PublicKey())
 	var out bytes.Buffer
 	w, _ := age.Encrypt(&out, rec)
@@ -32,9 +41,6 @@ func (f *fo) putDB(t *testing.T, id, slug string, restore *bundles.Restore) {
 	w.Write(raw)
 	w.Close()
 	if err := f.store.Put("clu_1", "database", id, "rev_"+id, out.Bytes(), bundles.Meta{Name: slug, CreatedAt: "2026-06-01T00:00:00Z"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.l.Assign(leader.Assign{Cluster: "clu_1", Kind: "database", ID: id, Slug: slug, SingleWriter: true, Members: []string{"srv_a"}}); err != nil {
 		t.Fatal(err)
 	}
 }
