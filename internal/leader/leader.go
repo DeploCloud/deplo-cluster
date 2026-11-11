@@ -87,6 +87,8 @@ type cluster struct {
 	// left is, per member, the single-writer workloads that moved off it and when, until it has said what it
 	// did with its copies: what it is told to save, and the time its backups are labelled with.
 	left map[string]map[string]time.Time
+	// kept is, per member, what it said it could not save: asked about, with its destination, until it keeps none.
+	kept map[string]map[string]time.Time
 	// waiting is what found no room, retried every RetryEvery; auth is where the leader put a workload until
 	// the control plane's picture agrees, so a roster that has not seen the move yet cannot undo it.
 	waiting map[string]*Waiting
@@ -237,6 +239,11 @@ func (l *Leader) SetRoster(r Roster) error {
 	for id := range c.left {
 		if next[id] == nil {
 			delete(c.left, id)
+		}
+	}
+	for id := range c.kept {
+		if next[id] == nil {
+			delete(c.kept, id)
 		}
 	}
 	c.members, c.placement = next, l.reconcilePlacement(c, r.Placement)
@@ -453,9 +460,9 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(sendTimeout))
-	if o.Return {
-		// Opened only for a member that answers: a keep carries its destination's credentials.
-		o.Keep = l.keepsFor(clusterID, m.ID)
+	// Opened only for a member that answers, never on a probe: a keep carries its destination's credentials.
+	if !o.Probe {
+		o.Keep, o.Stores = l.keepsFor(clusterID, m.ID), l.storesFor(clusterID, m.ID)
 	}
 	r, err := lease.Send(c, o)
 	if err != nil {
@@ -497,9 +504,11 @@ func (l *Leader) renew(ctx context.Context, clusterID string, m *member, o lease
 	}
 	tell := l.cameBack(clusterID, m.ID, r.Returned)
 	has := l.stillHas(clusterID, m.ID, r.Unplaced)
+	later := l.heardLater(clusterID, m.ID, r.Later)
 	l.mu.Unlock()
 	tell()
 	has()
+	later()
 	return true
 }
 

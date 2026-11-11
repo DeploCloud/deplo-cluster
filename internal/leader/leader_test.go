@@ -48,6 +48,10 @@ type members struct {
 	startLeft map[string]time.Duration
 	// returned is what a member that came back says it removed, once the leader asks.
 	returned map[string]*lease.Returned
+	// later is what a member says of the data it kept past its return, when the leader still asks about it.
+	later map[string]*lease.Later
+	// probes are the orders that only asked a member whether it takes the epoch.
+	probes map[string][]lease.Order
 	// restoreTakes is how long a member takes over a start order that restores a backup.
 	restoreTakes time.Duration
 	// slow is how long a member's plain renewal takes to reach it.
@@ -68,7 +72,7 @@ func (m *members) leaseEnd(fp string) time.Time {
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -103,6 +107,7 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 			r = lease.Reply{Error: lease.StaleEpoch, Epoch: held}
 		} else if o.Probe {
 			m.epoch[to.Fingerprint] = o.Epoch
+			m.probes[to.Fingerprint] = append(m.probes[to.Fingerprint], o)
 		} else {
 			m.epoch[to.Fingerprint] = o.Epoch
 			m.orders[to.Fingerprint] = append(m.orders[to.Fingerprint], o)
@@ -111,6 +116,8 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 			}
 			if o.Return {
 				r.Returned = m.returned[to.Fingerprint]
+			} else if len(o.Keep) > 0 {
+				r.Later = m.later[to.Fingerprint]
 			}
 			for _, e := range o.Placement {
 				if e.Member == "" && slices.Contains(m.has[to.Fingerprint], e.Slug) {

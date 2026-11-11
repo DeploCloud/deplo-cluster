@@ -68,10 +68,11 @@ type persisted struct {
 	Extended  map[string]time.Time            `json:"extended,omitempty"`
 	Returning map[string]bool                 `json:"returning,omitempty"`
 	Left      map[string]map[string]time.Time `json:"left,omitempty"`
+	Kept      map[string]map[string]time.Time `json:"kept,omitempty"`
 }
 
 func (l *Leader) newCluster(id string) *cluster {
-	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}, left: map[string]map[string]time.Time{}}
+	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}, left: map[string]map[string]time.Time{}, kept: map[string]map[string]time.Time{}}
 	if p, ok := l.restored[id]; ok {
 		if p.Extended != nil {
 			c.extended = p.Extended
@@ -81,6 +82,9 @@ func (l *Leader) newCluster(id string) *cluster {
 		}
 		if p.Left != nil {
 			c.left = p.Left
+		}
+		if p.Kept != nil {
+			c.kept = p.Kept
 		}
 		if p.Waiting != nil {
 			c.waiting = p.Waiting
@@ -110,7 +114,7 @@ func (l *Leader) saveFailover() {
 		out[id] = p
 	}
 	for id, c := range l.clusters {
-		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended, Returning: c.returning, Left: c.left}
+		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended, Returning: c.returning, Left: c.left, Kept: c.kept}
 	}
 	raw, _ := json.Marshal(out)
 	tmp := filepath.Join(l.cfg.StateDir, "failover.json.tmp")

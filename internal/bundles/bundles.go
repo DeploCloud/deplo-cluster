@@ -64,6 +64,9 @@ type Keep struct {
 	StoreMember string `json:"storeMember,omitempty"`
 	// Request is the agent's own backup request as JSON, credentials included; the leader passes it on unread.
 	Request json.RawMessage `json:"request"`
+	// StoreRoot and StoreStem say where on StoreMember's disk the archive goes: that member is told what to accept.
+	StoreRoot string `json:"storeRoot,omitempty"`
+	StoreStem string `json:"storeStem,omitempty"`
 }
 
 // RegistryAuth is a registry login a pulled image needs again.
