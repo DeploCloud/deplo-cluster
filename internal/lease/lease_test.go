@@ -1,8 +1,10 @@
 package lease_test
 
 import (
+	"bufio"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,7 +12,7 @@ import (
 )
 
 func TestTimingsAreTheSpecs(t *testing.T) {
-	if lease.RenewEvery != 5*time.Second || lease.NotRespondingAfter != 15*time.Second || lease.FenceAfter != 60*time.Second {
+	if lease.RenewEvery != time.Second || lease.NotRespondingAfter != 3*time.Second || lease.FenceAfter != 60*time.Second {
 		t.Fatalf("renew %v, not responding %v, fence %v", lease.RenewEvery, lease.NotRespondingAfter, lease.FenceAfter)
 	}
 }
@@ -21,8 +23,8 @@ func TestStateAfterSilence(t *testing.T) {
 		want   lease.State
 	}{
 		{0, lease.OK},
-		{14999 * time.Millisecond, lease.OK},
-		{15 * time.Second, lease.NotResponding},
+		{2999 * time.Millisecond, lease.OK},
+		{3 * time.Second, lease.NotResponding},
 		{59999 * time.Millisecond, lease.NotResponding},
 		{60 * time.Second, lease.Fenced},
 		{10 * time.Minute, lease.Fenced},
@@ -76,5 +78,27 @@ func TestAKeepAndAStoreAreTheAgentsWireShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"ok":true,"later":{"saved":[{"slug":"db-main","objectKey":"k","sizeBytes":7,"at":"x"}],"gone":["db-main"]}}`), &r); err != nil ||
 		r.Later == nil || len(r.Later.Saved) != 1 || r.Later.Saved[0].SizeBytes != 7 || len(r.Later.Gone) != 1 || r.Later.Gone[0] != "db-main" {
 		t.Fatalf("reply %+v (%v)", r, err)
+	}
+}
+
+// deplo-agent reads fenceSeconds and stoppedWithin by these names; a probe renews nothing, so it says no fence.
+func TestARenewalSaysHowLongItsLeaseLivesAndAProbeDoesNot(t *testing.T) {
+	for _, probe := range []bool{false, true} {
+		a, b := net.Pipe()
+		got := make(chan string, 1)
+		go func() {
+			line, _ := bufio.NewReader(b).ReadString('\n')
+			got <- line
+			b.Write([]byte(`{"ok":true,"stoppedWithin":21}` + "\n"))
+		}()
+		r, err := lease.Send(a, lease.Order{Cluster: "clu_1", Epoch: 3, Probe: probe})
+		a.Close()
+		b.Close()
+		if err != nil || r.StoppedWithin != 21 {
+			t.Fatalf("reply %+v (%v)", r, err)
+		}
+		if line := <-got; strings.Contains(line, `"fenceSeconds":5`) == probe {
+			t.Fatalf("probe %v sent %s", probe, line)
+		}
 	}
 }

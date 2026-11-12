@@ -53,23 +53,24 @@ func slugs(f *fo, fp string) string {
 	return strings.Join(out, ",")
 }
 
-func TestADatabaseIsRestoredFromItsLatestBackupBeforeAnyAppStarts(t *testing.T) {
+// An older member says nothing of its fence: its database waits out the 60 s lease and the stop after it.
+func TestADatabaseIsRestoredFromItsLatestBackupOnceAnOlderMemberHasSurelyStoppedIt(t *testing.T) {
 	f := two(t) // an older App with a domain, on srv_a
 	f.putDB(t, "db_1", "db-main", backup(""))
 	f.ms.cut["fp-srv_a"] = true
 	f.pass(75 * time.Second)
-	if len(f.ms.starts["fp-srv_b"]) != 0 || placed(f, "db_1") != "srv_a" {
-		t.Fatal("a database was restored before its member's lease ran out")
+	if slugs(f, "fp-srv_b") != "web" || placed(f, "db_1") != "srv_a" {
+		t.Fatalf("starts %q: a database was restored before its member's lease ran out", slugs(f, "fp-srv_b"))
 	}
 	f.pass(10 * time.Second)
-	if got := slugs(f, "fp-srv_b"); got != "db-main,web" {
-		t.Fatalf("start orders %q, want the database first", got)
+	if got := slugs(f, "fp-srv_b"); got != "web,db-main" {
+		t.Fatalf("start orders %q", got)
 	}
-	db := f.ms.starts["fp-srv_b"][0].Start
+	db := f.ms.starts["fp-srv_b"][1].Start
 	if db.Restore == nil || db.Restore.BackupID != "brun_1" || string(db.Restore.Request) != restoreRequest {
 		t.Fatalf("the database's start order carries no restore: %+v", db.Restore)
 	}
-	if f.ms.starts["fp-srv_b"][1].Start.Restore != nil {
+	if f.ms.starts["fp-srv_b"][0].Start.Restore != nil {
 		t.Fatal("a stateless App was given a restore")
 	}
 	if placed(f, "db_1") != "srv_b" {
@@ -82,8 +83,8 @@ func TestADatabaseIsRestoredFromItsLatestBackupBeforeAnyAppStarts(t *testing.T) 
 			moved = append(moved, string(e.Data))
 		}
 	}
-	if len(moved) != 2 || !strings.Contains(moved[0], `"kind":"database"`) || !strings.Contains(moved[0], `"backupId":"brun_1"`) ||
-		!strings.Contains(moved[0], `"backupAt":"2026-03-01T11:45:00Z"`) || strings.Contains(moved[1], "backupId") {
+	if len(moved) != 2 || !strings.Contains(moved[1], `"kind":"database"`) || !strings.Contains(moved[1], `"backupId":"brun_1"`) ||
+		!strings.Contains(moved[1], `"backupAt":"2026-03-01T11:45:00Z"`) || strings.Contains(moved[0], "backupId") {
 		t.Fatalf("failed_over events %v", moved)
 	}
 	if strings.Contains(strings.Join(moved, ""), "s3cr3t") {
@@ -91,6 +92,30 @@ func TestADatabaseIsRestoredFromItsLatestBackupBeforeAnyAppStarts(t *testing.T) 
 	}
 	if mv := f.l.Snapshot().Clusters["clu_1"].Moves; len(mv) != 2 || mv[1].ID != "db_1" || mv[1].BackupID != "brun_1" || mv[1].BackupAt != "2026-03-01T11:45:00Z" {
 		t.Fatalf("the snapshot's moves do not name the backup: %+v", mv)
+	}
+}
+
+// A member says when its fence is done; its database moves then, and its Environment's App with it.
+func TestADatabaseMovesAsSoonAsItsMemberSaysItHasStoppedIt(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64")})
+	f.ms.stoppedWithin["fp-srv_a"] = 20
+	f.putIn(t, "database", "db_1", "db-main", "environ_1", backup(""))
+	f.putIn(t, "app", "prj_1", "web", "environ_1", nil)
+	f.put(t, "prj_2", "site", "2026-01-01T00:00:00Z", true)
+	f.assign(t, "prj_2", "site", "srv_a")
+	f.pass(2 * time.Second)
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(6 * time.Second)
+	if got := slugs(f, "fp-srv_b"); got != "site" {
+		t.Fatalf("after 6 s the starts are %q, want only the App with no database", got)
+	}
+	f.pass(12 * time.Second)
+	if got := slugs(f, "fp-srv_b"); got != "site" {
+		t.Fatalf("after 18 s the starts are %q: the database moved before its member stopped it", got)
+	}
+	f.pass(3 * time.Second)
+	if got := slugs(f, "fp-srv_b"); got != "site,db-main,web" {
+		t.Fatalf("after 21 s the starts are %q", got)
 	}
 }
 
@@ -220,11 +245,48 @@ func TestAFailoverSaysHowLongTheRestoreTook(t *testing.T) {
 		}
 		took = append(took, d.RestoreMs)
 	}
-	if len(took) != 2 || took[0] < 40 || took[0] > 5000 {
+	if len(took) != 2 || took[1] < 40 || took[1] > 5000 {
 		t.Fatalf("restoreMs %v, want the 40 ms the member took", took)
 	}
 	// A control plane that missed the event reads the same from the snapshot.
 	if mv := f.l.Snapshot().Clusters["clu_1"].Moves; len(mv) != 2 || mv[1].RestoreMs < 40 || mv[0].RestoreMs != 0 {
 		t.Fatalf("the snapshot's moves: %+v", mv)
+	}
+}
+
+// A start order renews the lease of the member it lands on: that member's fence counts from the start's end.
+func TestADatabaseWaitsOutTheLeaseAStartOrderGaveItsMember(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64"), "srv_c": {Arch: "amd64", FreeMB: 2048}})
+	f.ms.stoppedWithin["fp-srv_b"] = 20
+	f.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
+	f.assign(t, "prj_1", "web", "srv_a")
+	f.sealDB(t, "db_2", "db-other", backup(""))
+	if err := f.l.Assign(leader.Assign{Cluster: "clu_1", Kind: "database", ID: "db_2", Slug: "db-other", SingleWriter: true, Members: []string{"srv_b"}}); err != nil {
+		t.Fatal(err)
+	}
+	f.pass(2 * time.Second)
+	// The App moves to srv_b, whose start takes 10 s; srv_b dies the moment it is over.
+	f.ms.onStart = func(fp string, _ lease.Order) {
+		if fp == "fp-srv_b" {
+			f.clk.Add(10 * time.Second)
+			f.ms.mu.Lock()
+			// srv_a is back, so only srv_b is silent: one of three.
+			f.ms.cut["fp-srv_b"], f.ms.cut["fp-srv_a"] = true, false
+			f.ms.mu.Unlock()
+		}
+	}
+	f.ms.cut["fp-srv_a"] = true
+	ended := time.Time{}
+	for i := 0; i < 60 && placed(f, "db_2") == "srv_b"; i++ {
+		f.pass(time.Second)
+		if ended.IsZero() && f.ms.cut["fp-srv_b"] {
+			ended = f.clk.Now()
+		}
+	}
+	if placed(f, "db_2") == "srv_b" {
+		t.Fatalf("the database never moved: web on %q, srv_b cut %v", placed(f, "prj_1"), f.ms.cut["fp-srv_b"])
+	}
+	if took := f.clk.Now().Sub(ended); took < 20*time.Second {
+		t.Fatalf("the database moved %s after the start that renewed srv_b, under its 20 s", took)
 	}
 }

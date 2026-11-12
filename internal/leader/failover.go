@@ -20,9 +20,11 @@ import (
 )
 
 const (
-	// FailoverAfter is how long a member is silent before its work moves: the 60 s fence plus a margin, so
-	// the member has stopped what must never run twice before anything starts elsewhere.
-	FailoverAfter = 81 * time.Second
+	// FailoverAfter is how long a member is silent before its work moves; what must never run twice waits
+	// until the member has stopped it as well (member.stopped).
+	FailoverAfter = 5 * time.Second
+	// fenceMargin is what an older member's fence takes to stop its stacks once its lease ran out.
+	fenceMargin = 21 * time.Second
 	// RetryEvery is how often work that found no room is placed again.
 	RetryEvery = 30 * time.Second
 	// maxStartTries bounds the members tried for one workload in one pass.
@@ -327,6 +329,9 @@ func (l *Leader) startOrder(b bundles.Bundle) *lease.Start {
 
 // sendStart gives one member the order to bring a workload up and waits for it to answer.
 func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error {
+	// A start renews the member's lease too, when it lands: until it is over, its fence counts from its end.
+	l.startsTo(o, 1)
+	defer l.startsTo(o, -1)
 	// ponytail: one start at a time, so a long restore holds the Apps behind it; run restores beside them if that hurts.
 	limit := lease.StartTimeout
 	if o.Start.Restore != nil {
@@ -523,7 +528,7 @@ func (c *cluster) mayStart(kind, id string, replica int, from string, waited boo
 	if m == nil {
 		return entry, ""
 	}
-	held := m.presumedAlive(now) || now.Before(c.extended[from].Add(FailoverAfter-lease.FenceAfter))
+	held := m.presumedAlive(now) || now.Before(c.extended[from].Add(fenceMargin)) || !m.stopped(now)
 	if now.Sub(m.lastAck) < FailoverAfter || (entry.SingleWriter && held) {
 		return entry, StillAnswering
 	}
@@ -713,23 +718,29 @@ func (l *Leader) Failover(ctx context.Context) {
 		for _, mid := range mids {
 			m := c.members[mid]
 			// A lease extended before a restart may still be alive on a member this leader has not heard since.
-			if now.Sub(m.lastAck) < FailoverAfter || now.Before(c.extended[mid].Add(FailoverAfter-lease.FenceAfter)) {
+			if now.Sub(m.lastAck) < FailoverAfter || now.Before(c.extended[mid].Add(fenceMargin)) {
 				continue
 			}
-			// A member this leader never heard may hold a lease another leader extended: what must never run
-			// twice waits that out, and moves in a second pass once it has.
-			held := m.presumedAlive(now)
-			if c.moved[mid] && (held || m.presumed.IsZero()) {
+			// What must never run twice waits until the member has stopped it, and for a lease another leader
+			// may have extended: it moves in a second pass once both are over.
+			held := m.presumedAlive(now) || !m.stopped(now)
+			again := c.moved[mid]
+			if again && (held || !m.heldBack) {
 				continue
 			}
 			var es []lease.Entry
 			for _, e := range c.placement {
 				// A single-writer workload moves only onto a standby copy or a backup another member can read; else it waits.
-				if e.Member == mid && (!e.SingleWriter || (!held && (l.restorable(id, e, mid) || l.promotable(c, id, e, mid, now)))) {
+				if e.Member != mid {
+					continue
+				}
+				// An App goes with its Environment's database, so it waits beside it.
+				if e.SingleWriter && !held && (l.restorable(id, e, mid) || l.promotable(c, id, e, mid, now)) ||
+					!e.SingleWriter && (!again && (!held || !l.withItsDatabase(id, c, e)) || again && l.withItsDatabase(id, c, e)) {
 					es = append(es, e)
 				}
 			}
-			c.moved[mid] = true
+			c.moved[mid], m.heldBack = true, held
 			if !held {
 				m.presumed = time.Time{}
 			}
@@ -759,9 +770,50 @@ func (l *Leader) Failover(ctx context.Context) {
 	}
 }
 
+func (l *Leader) startsTo(o lease.Order, n int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if c := l.clusters[o.Cluster]; c != nil && c.members[o.Member] != nil {
+		m := c.members[o.Member]
+		m.startsOut += n
+		m.startEnded = l.cfg.Now()
+	}
+}
+
+// withItsDatabase says a stateless workload shares an Environment with a database on its own member.
+func (l *Leader) withItsDatabase(clusterID string, c *cluster, e lease.Entry) bool {
+	m, err := l.cfg.Bundles.Meta(clusterID, e.Kind, e.ID)
+	if err != nil || m.Environment == "" {
+		return false
+	}
+	for _, d := range c.placement {
+		if d.Member == e.Member && d.Kind == "database" && d.SingleWriter {
+			if dm, err := l.cfg.Bundles.Meta(clusterID, d.Kind, d.ID); err == nil && dm.Environment == m.Environment {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // presumedAlive says whether a lease another leader gave this member may still be running, margin included.
 func (m *member) presumedAlive(now time.Time) bool {
-	return now.Before(m.presumed.Add(FailoverAfter - lease.FenceAfter))
+	return now.Before(m.presumed.Add(fenceMargin))
+}
+
+// stopped says a silent member has surely stopped its single-writer workloads by now, by its own word or an
+// older member's fence.
+func (m *member) stopped(now time.Time) bool {
+	within := lease.FenceAfter + fenceMargin
+	if m.stoppedWithin > 0 {
+		within = m.stoppedWithin
+	}
+	// ponytail: a member that dies mid-start keeps its databases until that start times out.
+	last := m.lastAck
+	if m.startEnded.After(last) {
+		last = m.startEnded
+	}
+	return m.startsOut == 0 && now.Sub(last) >= max(within, FailoverAfter)
 }
 
 // restorable says whether the workload's bundle names a backup that did not go down with its member.

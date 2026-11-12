@@ -24,10 +24,12 @@ import (
 var ErrOlderEpoch = errors.New("the leader holds a newer epoch")
 
 const (
-	sendTimeout = 4 * time.Second
+	// sendTimeout is under SureFor: a round waits for its slowest member, and the live ones are renewed again
+	// before their lease is old.
+	sendTimeout = 2 * time.Second
 	// SureFor is how long a round that a quorum answered lets this leader send orders without asking again:
-	// two renewals, so one slow member does not make it ask every time.
-	SureFor = 2 * lease.RenewEvery
+	// longer than a round that waited out a silent member, so one does not make it ask every time.
+	SureFor = 4 * lease.RenewEvery
 	// DeploFor is how long the control plane's last beat breaks a tie for a leader that hears exactly half of
 	// its members. Deplo waits longer than this before it lets another leader lead.
 	DeploFor = 20 * time.Second
@@ -72,6 +74,13 @@ type member struct {
 	state   lease.State
 	// presumed is when the longest lease another leader may have given it runs out; zero once it answered this one.
 	presumed time.Time
+	// stoppedWithin is the member's own word on how soon after a renewal its fence is done; zero is an older one.
+	stoppedWithin time.Duration
+	// heldBack is a failover that left the single-writer workloads for a second pass.
+	heldBack bool
+	// startsOut are the start orders on their way to it, startEnded when the last one was over.
+	startsOut  int
+	startEnded time.Time
 }
 
 type cluster struct {
@@ -533,7 +542,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 		return r.OK
 	}
 	l.mu.Lock()
-	m.lastAck = l.cfg.Now()
+	m.lastAck, m.stoppedWithin = l.cfg.Now(), time.Duration(r.StoppedWithin)*time.Second
 	// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
 	if o.ExtendSeconds == 0 {
 		m.presumed = time.Time{}
@@ -575,7 +584,11 @@ func (l *Leader) settle() {
 		sort.Strings(mids)
 		for _, mid := range mids {
 			m := c.members[mid]
-			if s := lease.StateAfter(now.Sub(m.lastAck)); s != m.state {
+			s := lease.StateAfter(now.Sub(m.lastAck))
+			if s == lease.NotResponding && m.stoppedWithin > 0 && now.Sub(m.lastAck) >= m.stoppedWithin {
+				s = lease.Fenced
+			}
+			if s != m.state {
 				m.state = s
 				out = append(out, change{id, mid, string(s)})
 			}

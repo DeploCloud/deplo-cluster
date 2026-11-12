@@ -126,7 +126,7 @@ func TestWorkThatFoundNoRoomGoesBackToTheMemberThatReturns(t *testing.T) {
 func TestAMemberQuietForAMomentIsNotAReturn(t *testing.T) {
 	f := two(t)
 	f.ms.cut["fp-srv_a"] = true
-	f.pass(70 * time.Second)
+	f.pass(4 * time.Second)
 	f.ms.cut["fp-srv_a"] = false
 	f.ms.returned["fp-srv_a"] = &lease.Returned{Removed: []string{"web"}}
 	f.pass(30 * time.Second)

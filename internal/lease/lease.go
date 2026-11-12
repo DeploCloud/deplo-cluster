@@ -11,11 +11,14 @@ import (
 
 const (
 	// RenewEvery is how often the leader renews each member's lease.
-	RenewEvery = 5 * time.Second
+	RenewEvery = 1 * time.Second
 	// NotRespondingAfter is how long without a renewal before the cluster card says so.
-	NotRespondingAfter = 15 * time.Second
-	// FenceAfter is how long without a renewal before a member stops its single-writer workloads.
+	NotRespondingAfter = 3 * time.Second
+	// FenceAfter is the longest a member lives without a renewal before it stops its single-writer workloads:
+	// an older agent's fence, and what any member is held to until it says StoppedWithin.
 	FenceAfter = 60 * time.Second
+	// FenceFor is how long this leader's member lives without a renewal: every renewal says so (Order.FenceSeconds).
+	FenceFor = 5 * time.Second
 	// MaxLine bounds one order or reply; a start order carries a stack and its variables.
 	MaxLine = 16 << 20
 	// StartTimeout is how long a member may take to bring a moved workload up.
@@ -72,6 +75,9 @@ type Order struct {
 	Placement []Entry `json:"placement"`
 	// ExtendSeconds adds to the time this lease lives without the next renewal: a leader about to restart sends it.
 	ExtendSeconds int `json:"extendSeconds,omitempty"`
+	// FenceSeconds is how long the lease lives without the next renewal; an older leader never sets it, and its
+	// member keeps FenceAfter.
+	FenceSeconds int `json:"fenceSeconds,omitempty"`
 	// Probe only asks whether the member takes this epoch. It renews nothing and tells the member nothing else,
 	// and a member that answers refuses every older epoch from then on.
 	Probe bool `json:"probe,omitempty"`
@@ -219,6 +225,9 @@ type Reply struct {
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
 	Epoch    uint64 `json:"epoch,omitempty"`
+	// StoppedWithin is how many seconds after its last renewal this member has surely stopped its single-writer
+	// workloads; an older member never sets it.
+	StoppedWithin int `json:"stoppedWithin,omitempty"`
 	// Returned answers an order's Return once the member is done removing what moved away.
 	Returned *Returned `json:"returned,omitempty"`
 	// Unplaced is the stacks the order placed on no member that this member still has, running or stopped by
@@ -240,6 +249,9 @@ var ErrStale = errors.New("a member holds a newer epoch")
 
 // Send writes the order and reads the member's reply on one stream.
 func Send(c io.ReadWriter, o Order) (Reply, error) {
+	if !o.Probe {
+		o.FenceSeconds = int(FenceFor / time.Second)
+	}
 	raw, err := json.Marshal(o)
 	if err != nil {
 		return Reply{}, err

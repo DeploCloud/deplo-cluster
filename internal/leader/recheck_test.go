@@ -60,7 +60,7 @@ func TestAMemberThatAnswersAgainMidPassKeepsWhatThePassHasNotStarted(t *testing.
 	f.put(t, "prj_2", "api", "2026-02-01T00:00:00Z", true)
 	f.assign(t, "prj_2", "api", "srv_a")
 	f.ms.cut["fp-srv_a"] = true
-	f.pass(80 * time.Second)
+	f.pass(4 * time.Second)
 	f.during(func() {
 		f.ms.mu.Lock()
 		f.ms.cut["fp-srv_a"] = false
@@ -131,9 +131,9 @@ func TestAPassCutShortResumesWithTheRestOfTheDeadMembersWork(t *testing.T) {
 	f.put(t, "prj_2", "api", "2026-02-01T00:00:00Z", true)
 	f.assign(t, "prj_2", "api", "srv_a")
 	f.ms.cut["fp-srv_a"] = true
-	f.pass(80 * time.Second)
+	f.pass(4 * time.Second)
 	f.during(func() { f.clk.Add(2 * leader.SureFor) })
-	f.pass(5 * time.Second)
+	f.pass(lease.RenewEvery)
 	if placed(f, "prj_1") == "srv_a" || placed(f, "prj_2") != "srv_a" {
 		t.Fatalf("after the cut-short pass: web on %q, api on %q", placed(f, "prj_1"), placed(f, "prj_2"))
 	}
@@ -172,9 +172,8 @@ func TestARetryCutShortKeepsWaiting(t *testing.T) {
 // Databases first, also on a retry.
 func TestRetriesFollowTheFailoverOrder(t *testing.T) {
 	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": {Arch: "amd64", FreeMB: 100}, "srv_c": {Arch: "amd64", FreeMB: 100}})
-	f.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
-	f.assign(t, "prj_1", "web", "srv_a")
-	f.putDB(t, "db_1", "db-main", backup(""))
+	f.putIn(t, "app", "prj_1", "web", "environ_1", nil)
+	f.putIn(t, "database", "db_1", "db-main", "environ_1", backup(""))
 	f.ms.cut["fp-srv_a"] = true
 	f.pass(85 * time.Second)
 	r := snapshotRoster(f, 1)

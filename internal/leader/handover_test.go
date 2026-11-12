@@ -139,7 +139,7 @@ func TestALeaderThatLeadsAgainDropsTheMovesItMadeBefore(t *testing.T) {
 	}
 }
 
-// A leader that did not lead heard nobody. It must hear 81 s of silence itself before it moves anything.
+// A leader that did not lead heard nobody. It must hear the silence itself before it moves anything.
 func TestALeaderThatLeadsAgainStartsEveryLeaseOver(t *testing.T) {
 	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64"), "srv_c": roomy("amd64")})
 	f.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
@@ -160,12 +160,12 @@ func TestALeaderThatLeadsAgainStartsEveryLeaseOver(t *testing.T) {
 	if err := f.l.SetRoster(r); err != nil {
 		t.Fatal(err)
 	}
-	f.pass(10 * time.Second)
+	f.pass(2 * time.Second)
 	if placed(f, "prj_1") != "srv_c" || len(f.ms.starts["fp-srv_a"])+len(f.ms.starts["fp-srv_b"]) != 0 {
-		t.Fatalf("work moved off a member this leader had not heard silent for 81 s: %q", placed(f, "prj_1"))
+		t.Fatalf("work moved off a member this leader had not heard silent for 5 s: %q", placed(f, "prj_1"))
 	}
 	if got := states(t, f.l)["srv_c"]; got != "ok" {
-		t.Fatalf("srv_c is %s after 10 s", got)
+		t.Fatalf("srv_c is %s after 2 s", got)
 	}
 	f.pass(75 * time.Second)
 	if placed(f, "prj_1") == "srv_c" {

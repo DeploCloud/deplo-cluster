@@ -96,10 +96,10 @@ func (f *fo) assign(t *testing.T, id, slug string, members ...string) {
 	}
 }
 
-// pass advances the clock in 5 s renewal steps, running a tick and a failover pass at each.
+// pass advances the clock in renewal steps, running a tick and a failover pass at each.
 func (f *fo) pass(d time.Duration) {
-	for ; d > 0; d -= 5 * time.Second {
-		f.clk.Add(5 * time.Second)
+	for ; d > 0; d -= lease.RenewEvery {
+		f.clk.Add(lease.RenewEvery)
 		f.step()
 	}
 }
@@ -122,14 +122,14 @@ func placed(f *fo, id string) string {
 	return "?"
 }
 
-func TestNothingMovesBefore81sAndTheWorkMovesAfter(t *testing.T) {
+func TestAStatelessAppMovesAfter5sOfSilence(t *testing.T) {
 	f := two(t)
 	f.ms.cut["fp-srv_a"] = true
-	f.pass(75 * time.Second)
+	f.pass(4 * time.Second)
 	if len(f.ms.starts["fp-srv_b"]) != 0 || placed(f, "prj_1") != "srv_a" {
-		t.Fatal("work moved before about 81 s of silence")
+		t.Fatal("work moved before 5 s of silence")
 	}
-	f.pass(10 * time.Second)
+	f.pass(2 * time.Second)
 	got := f.ms.starts["fp-srv_b"]
 	if len(got) != 1 || got[0].Start.Slug != "web" || got[0].Start.Env["K"] != "v" || placed(f, "prj_1") != "srv_b" {
 		t.Fatalf("start orders %+v placed %s", got, placed(f, "prj_1"))
@@ -201,7 +201,7 @@ func TestWhatDoesNotFitWaitsAndIsRetriedEvery30s(t *testing.T) {
 	f.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
 	f.assign(t, "prj_1", "web", "srv_a")
 	f.ms.cut["fp-srv_a"] = true
-	f.pass(85 * time.Second)
+	f.pass(6 * time.Second)
 	if placed(f, "prj_1") != "" || len(f.ms.starts["fp-srv_b"]) != 0 {
 		t.Fatalf("a workload with no room was placed: %q", placed(f, "prj_1"))
 	}

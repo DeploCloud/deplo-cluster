@@ -33,10 +33,10 @@ func split(t *testing.T, f *fo, far ...string) *fo {
 	return g
 }
 
-// passAll is pass for leaders that share a clock: each renews and fails over at every 5 s step.
+// passAll is pass for leaders that share a clock: each renews and fails over at every renewal step.
 func passAll(d time.Duration, fs ...*fo) {
-	for ; d > 0; d -= 5 * time.Second {
-		fs[0].clk.Add(5 * time.Second)
+	for ; d > 0; d -= lease.RenewEvery {
+		fs[0].clk.Add(lease.RenewEvery)
 		for _, f := range fs {
 			f.step()
 		}
@@ -155,8 +155,8 @@ func TestWithDeploDownFailoverStillWorksWhileMostMembersAnswer(t *testing.T) {
 }
 
 // The price of the tie rule: Deplo is down and one of two members dies. The leader cannot tell this from the
-// split above, so it moves nothing and stops renewing the member that is left, which stops its database.
-// When Deplo is back the leader leads again and the dead member's work moves.
+// split above: once Deplo's last word is too old it moves nothing and stops renewing the member that is left,
+// which stops its database. When Deplo is back the leader leads again and the dead member's work moves.
 func TestWithDeploDownAndHalfTheMembersSilentTheLeaderStopsUntilDeploIsBack(t *testing.T) {
 	f := two(t)
 	f.putDB(t, "db_1", "db-main", backup(""))
@@ -165,8 +165,8 @@ func TestWithDeploDownAndHalfTheMembersSilentTheLeaderStopsUntilDeploIsBack(t *t
 	f.ms.cut["fp-srv_a"] = true
 	down := f.clk.Now()
 	f.pass(5 * time.Minute)
-	if startedOn(f) != "" || placed(f, "prj_1") != "srv_a" {
-		t.Fatalf("work moved while the leader could not tell a dead member from a split: %q", startedOn(f))
+	if startedOn(f) != "" || placed(f, "db_1") != "srv_a" {
+		t.Fatalf("the database moved while the leader could not tell a dead member from a split: %q", startedOn(f))
 	}
 	if last := f.ms.leaseEnd("fp-srv_b").Add(-lease.FenceAfter); last.Sub(down) > leader.DeploFor {
 		t.Fatalf("srv_b was renewed for %s after Deplo went down", last.Sub(down))

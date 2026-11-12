@@ -26,7 +26,7 @@ for the rules, `../deplo/CONTEXT.md` for the vocabulary (use those words) and
 - `internal/cluster/` - role, version (stamped by the build) and epoch.
 - `internal/wire/` - the relay's names, stream headers and mutual TLS rules (a contract with `deplo-agent`).
 - `internal/relay/` - the relay: the door, the roster pushed on its local socket, per-address rate limit.
-- `internal/lease/` - the 5 s / 15 s / 60 s timings and the order each renewal carries (a contract with `deplo-agent`).
+- `internal/lease/` - the 1 s / 3 s / 5 s timings (60 s for an older agent) and the order each renewal carries (a contract with `deplo-agent`).
 - `internal/events/` - the sequenced buffer a control plane that was away replays from.
 - `internal/leader/` - the leader: renews leases, tracks member state, serves `/call/*` and `/watch` on its local socket.
 - `internal/party/` - a party's side (leader or member): dials out to every relay, never listens.

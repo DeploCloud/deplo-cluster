@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/DeploCloud/deplo-cluster/internal/bundles"
-	"github.com/DeploCloud/deplo-cluster/internal/lease"
 )
 
 // Why a move a person asked for is not made.
@@ -61,7 +60,7 @@ func (c *cluster) leftBy(kind, id string, now time.Time) (from, why string) {
 		}
 		return from, ""
 	}
-	if m := c.members[from]; m != nil && (now.Sub(m.lastAck) < FailoverAfter || m.presumedAlive(now) || now.Before(c.extended[from].Add(FailoverAfter-lease.FenceAfter))) {
+	if m := c.members[from]; m != nil && (!m.stopped(now) || m.presumedAlive(now) || now.Before(c.extended[from].Add(fenceMargin))) {
 		return from, StillAnswering
 	}
 	return from, ""

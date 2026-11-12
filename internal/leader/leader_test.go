@@ -64,6 +64,8 @@ type members struct {
 	now     func() time.Time
 	renewed map[string]time.Time
 	extra   map[string]int
+	// stoppedWithin is what a member says of its own fence, in seconds; zero is an older member.
+	stoppedWithin map[string]int
 }
 
 // leaseEnd is when the lease a member holds runs out, as its agent counts it.
@@ -74,7 +76,7 @@ func (m *members) leaseEnd(fp string) time.Time {
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, stoppedWithin: map[string]int{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -113,6 +115,7 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 		} else {
 			m.epoch[to.Fingerprint] = o.Epoch
 			m.orders[to.Fingerprint] = append(m.orders[to.Fingerprint], o)
+			r.StoppedWithin = m.stoppedWithin[to.Fingerprint]
 			if m.now != nil {
 				m.renewed[to.Fingerprint], m.extra[to.Fingerprint] = m.now(), o.ExtendSeconds
 			}
@@ -202,7 +205,7 @@ func TestRenewalCarriesTheEpochAndThePlacement(t *testing.T) {
 	}
 }
 
-func TestSilentMemberIsNotRespondingAt15sAndFencedAt60sAndBackWhenItAnswers(t *testing.T) {
+func TestSilentMemberIsNotRespondingAt3sAndFencedAt60sAndBackWhenItAnswers(t *testing.T) {
 	l, clk, ms := start(t, "")
 	if err := l.SetRoster(roster(1, "srv_a", "srv_b")); err != nil {
 		t.Fatal(err)
@@ -213,11 +216,10 @@ func TestSilentMemberIsNotRespondingAt15sAndFencedAt60sAndBackWhenItAnswers(t *t
 		advance time.Duration
 		want    string
 	}{
-		{5 * time.Second, "ok"}, {5 * time.Second, "ok"},
-		{5 * time.Second, "not_responding"}, // 15 s since the last renewal
-		{35 * time.Second, "not_responding"},
-		{5 * time.Second, "not_responding"}, // 55 s
-		{5 * time.Second, "fenced"},         // 60 s
+		{time.Second, "ok"}, {time.Second, "ok"},
+		{time.Second, "not_responding"}, // 3 s since the last renewal
+		{56 * time.Second, "not_responding"},
+		{time.Second, "fenced"}, // 60 s: an older member says nothing of its own fence
 	} {
 		clk.Add(step.advance)
 		// Deplo is up: with one of two members silent, its word is what lets the leader go on renewing the other.
@@ -231,7 +233,7 @@ func TestSilentMemberIsNotRespondingAt15sAndFencedAt60sAndBackWhenItAnswers(t *t
 		}
 	}
 	ms.cut["fp-srv_b"] = false
-	clk.Add(5 * time.Second)
+	clk.Add(time.Second)
 	l.Tick(ctx)
 	if got := states(t, l)["srv_b"]; got != "ok" {
 		t.Fatalf("a member that answered again is %s", got)

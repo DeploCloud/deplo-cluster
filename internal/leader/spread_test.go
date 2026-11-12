@@ -67,11 +67,11 @@ func TestALostReplicaOfASpreadAppStartsBesideTheOnesOnASurvivingMember(t *testin
 	f.putReplicas(t, "prj_1", "web", true)
 	f.assign(t, "prj_1", "web", "srv_a", "srv_b", "srv_c")
 	f.ms.cut["fp-srv_c"] = true
-	f.pass(75 * time.Second)
+	f.pass(4 * time.Second)
 	if replicas(f, "prj_1") != "srv_a,srv_b,srv_c" {
-		t.Fatal("a replica moved before about 81 s of silence")
+		t.Fatal("a replica moved before 5 s of silence")
 	}
-	f.pass(10 * time.Second)
+	f.pass(2 * time.Second)
 	got := f.ms.starts["fp-srv_a"]
 	if replicas(f, "prj_1") != "srv_a,srv_b,srv_a" || len(got) != 1 || len(f.ms.starts["fp-srv_b"]) != 0 {
 		t.Fatalf("placed %s, starts on a %d on b %d", replicas(f, "prj_1"), len(got), len(f.ms.starts["fp-srv_b"]))
