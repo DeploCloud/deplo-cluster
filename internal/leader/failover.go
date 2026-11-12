@@ -718,12 +718,12 @@ func (l *Leader) Failover(ctx context.Context) {
 		for _, mid := range mids {
 			m := c.members[mid]
 			// A lease extended before a restart may still be alive on a member this leader has not heard since.
-			if now.Sub(m.lastAck) < FailoverAfter || now.Before(c.extended[mid].Add(fenceMargin)) {
+			if now.Sub(m.lastAck) < FailoverAfter {
 				continue
 			}
-			// What must never run twice waits until the member has stopped it, and for a lease another leader
-			// may have extended: it moves in a second pass once both are over.
-			held := m.presumedAlive(now) || !m.stopped(now)
+			// What must never run twice waits until the member has stopped it, and for a lease this or another
+			// leader may have extended: it moves in a second pass once both are over.
+			held := m.presumedAlive(now) || now.Before(c.extended[mid].Add(fenceMargin)) || !m.stopped(now)
 			again := c.moved[mid]
 			if again && (held || !m.heldBack) {
 				continue

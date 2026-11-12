@@ -290,6 +290,17 @@ func TestDrainExtendsEveryLeaseBeforeAPlannedRestart(t *testing.T) {
 	}
 }
 
+// A drain extends every lease before a restart; only what must never run twice waits that lease out.
+func TestAStatelessAppMovesAfter5sEvenOnAnExtendedLease(t *testing.T) {
+	f := two(t)
+	f.l.Drain(context.Background())
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(6 * time.Second)
+	if placed(f, "prj_1") != "srv_b" {
+		t.Fatalf("a stateless App waited out the extended lease: on %q", placed(f, "prj_1"))
+	}
+}
+
 func TestPlacementPlaceUsesLeaseStateAndGivenFacts(t *testing.T) {
 	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64")})
 	f.ms.cut["fp-srv_a"] = true
