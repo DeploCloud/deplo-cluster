@@ -56,6 +56,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	stateDir := fs.String("state", envOr("DEPLO_RELAY_STATE", envOr("DEPLO_CLUSTER_STATE", "")), "directory that keeps state across restarts: the relay's roster, or the leader's epochs and events")
 	leaderSocket := fs.String("leader-socket", envOr("DEPLO_CLUSTER_SOCKET", ""), "leader: unix socket the agent forwards calls on")
 	relays := fs.String("relays-file", envOr("DEPLO_CLUSTER_RELAYS_FILE", ""), "leader: file listing the relays to dial, one address per line")
+	meshSocket := fs.String("mesh-socket", envOr("DEPLO_CLUSTER_MESH_SOCKET", ""), "leader: unix socket of the agent's way onto the cluster's network")
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
@@ -73,12 +74,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	return runLeader(ctx, identity, *cert != "" && *relays != "", *relays, *leaderSocket, *stateDir, logger)
+	return runLeader(ctx, identity, *cert != "" && *relays != "", *relays, *leaderSocket, *stateDir, *meshSocket, logger)
 }
 
-// runLeader answers the agent on its local socket and renews every member's lease through the relays.
-func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dial bool, relays, socket, stateDir string, logger *log.Logger) int {
+// runLeader answers the agent on its local socket and renews every member's lease: through the cluster's network
+// when the agent beside it is on it, and through the relays beside that.
+func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dial bool, relays, socket, stateDir, meshSocket string, logger *log.Logger) int {
 	var p *party.Party
+	door := newMeshDoor(meshSocket)
 	// The party outlives ctx by one drain: the last renewals still need its connections.
 	partyCtx, stopParty := context.WithCancel(context.Background())
 	defer stopParty()
@@ -90,6 +93,7 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 			Relays:    func() []string { return readLines(relays) },
 			// Members never open a stream to the leader; only the leader sends orders.
 			Accept: func(_ wire.Party, c net.Conn) { c.Close() },
+			Direct: door.dial,
 			Logf:   logger.Printf,
 		})
 		go p.Run(partyCtx)
@@ -113,7 +117,7 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 		StateDir: stateDir,
 		Logf:     logger.Printf,
 		Bundles:  store,
-		PathOK:   func() bool { return p != nil && p.Connected() > 0 },
+		PathOK:   func() bool { return p != nil && (p.Connected() > 0 || door.up()) },
 	})
 	// A planned restart extends every lease first, so no member fences itself while this leader is away.
 	defer func() {

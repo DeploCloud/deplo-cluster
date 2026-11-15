@@ -9,7 +9,8 @@ failover bundles and orders failovers; the relay carries member traffic over TCP
 for the rules, `../deplo/CONTEXT.md` for the vocabulary (use those words) and
 `../deplo/docs/adr/0043-a-cluster-is-led-by-its-own-leader-not-kubernetes.md`,
 `0044-cluster-members-meet-through-a-relay-over-tcp.md` and
-`0045-a-cluster-leader-holds-sealed-failover-bundles.md` for why this binary exists.
+`0045-a-cluster-leader-holds-sealed-failover-bundles.md` for why this binary exists, and
+`0047-a-cluster-shares-a-private-network-over-wireguard.md` for the network its streams go through.
 
 - **It never builds compose.** It re-sends the last stack the control plane rendered for an App
   (ADR-0043). Never port routing, compose or gateway logic here.
@@ -29,7 +30,11 @@ for the rules, `../deplo/CONTEXT.md` for the vocabulary (use those words) and
 - `internal/lease/` - the 1 s / 3 s / 5 s timings (60 s for an older agent) and the order each renewal carries (a contract with `deplo-agent`).
 - `internal/events/` - the sequenced buffer a control plane that was away replays from.
 - `internal/leader/` - the leader: renews leases, tracks member state, serves `/call/*` and `/watch` on its local socket.
-- `internal/party/` - a party's side (leader or member): dials out to every relay, never listens.
+- `internal/party/` - a party's side (leader or member): dials out to every relay, never listens. A
+  stream goes through the cluster's private network first when the party has a `Direct` way onto it
+  (ADR-0047), with a relay tried beside it after a second.
+- `mesh_door.go` - the leader's way onto that network: the agent beside it opens a stream through the
+  tunnel on `DEPLO_CLUSTER_MESH_SOCKET`. Without it the leader reaches members through the relays only.
 
 `internal/party/party.go`, `internal/wire/` and `internal/lease/` each have a **hand-kept copy** in `deplo-agent`
 (`internal/clusterlink/`). Change both sides in one go, new fields with `omitempty`; the agent's
