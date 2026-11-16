@@ -181,3 +181,112 @@ func TestALeaderThatLostItsStateStillWaitsOutItsOwnExtension(t *testing.T) {
 		t.Fatalf("the database never moved once the lease had run out: %q", placed(f, "db_1"))
 	}
 }
+
+// newer is f's members as newer agents: they count what leaders say of extensions and keep to a short fence.
+func newer(f *fo) {
+	f.ms.mu.Lock()
+	defer f.ms.mu.Unlock()
+	for _, fp := range []string{"fp-srv_a", "fp-srv_b", "fp-srv_c"} {
+		f.ms.witness[fp], f.ms.shortFence[fp] = true, true
+	}
+}
+
+// shortFences is Deplo's picture with every member's agent known to keep to the fence it is given.
+func shortFences(r leader.Roster) leader.Roster {
+	for i := range r.Members {
+		r.Members[i].ShortFence = true
+	}
+	return r
+}
+
+// The member is really gone, and the one that answers says no lease can live on an extension: its database
+// moves once the plain 5 s lease and the time to stop are over, not after five minutes.
+func TestATakeoverMovesADeadMembersDatabaseOnceAMemberVouchesNoLeaseWasExtended(t *testing.T) {
+	f := two(t)
+	newer(f)
+	f.putDB(t, "db_1", "db-main", backup(""))
+	f.pass(10 * time.Second)
+	f.ms.cut["fp-srv_a"] = true
+	g := takeOverWith(t, f, shortFences(snapshotRoster(f, f.l.Snapshot().Clusters["clu_1"].Epoch+1)))
+	g.putDB(t, "db_1", "db-main", backup(""))
+
+	g.pass(20 * time.Second)
+	if placed(g, "prj_1") != "srv_b" || placed(g, "db_1") != "srv_a" {
+		t.Fatalf("after 20 s: web on %q, the database on %q", placed(g, "prj_1"), placed(g, "db_1"))
+	}
+	g.pass(10 * time.Second)
+	if placed(g, "db_1") != "srv_b" {
+		t.Fatalf("after 30 s the database is still on %q", placed(g, "db_1"))
+	}
+}
+
+// Without Deplo's word on its agent, the dead member may keep the longest fence: the plain lease is that one.
+func TestATakeoverWaitsOutTheLongFenceOfAMemberDeploKnowsNothingOf(t *testing.T) {
+	f := two(t)
+	newer(f)
+	f.putDB(t, "db_1", "db-main", backup(""))
+	f.pass(10 * time.Second)
+	f.ms.cut["fp-srv_a"] = true
+	g := takeOver(t, f)
+	g.putDB(t, "db_1", "db-main", backup(""))
+
+	g.pass(75 * time.Second)
+	if placed(g, "db_1") != "srv_a" {
+		t.Fatal("the database moved before a 60 s fence and its stop were over")
+	}
+	g.pass(15 * time.Second)
+	if placed(g, "db_1") != "srv_b" {
+		t.Fatalf("after 90 s the database is still on %q", placed(g, "db_1"))
+	}
+}
+
+// A planned restart extends the leases, and its leader never comes back: the member that answers heard the
+// extension announced, so the one that takes over waits it out. Never two writers.
+func TestATakeoverWaitsOutAnExtensionTheMembersHeardAnnounced(t *testing.T) {
+	f := two(t)
+	newer(f)
+	f.putDB(t, "db_1", "db-main", backup(""))
+	f.pass(10 * time.Second)
+	f.l.Drain(context.Background())
+	if f.lastOrder("fp-srv_a").ExtendSeconds == 0 {
+		t.Fatal("srv_a's lease was not extended")
+	}
+	end := f.ms.leaseEnd("fp-srv_a")
+	f.clk.Add(15 * time.Second)
+	g := takeOverWith(t, f, shortFences(snapshotRoster(f, f.l.Snapshot().Clusters["clu_1"].Epoch+1)), "srv_a")
+	g.putDB(t, "db_1", "db-main", backup(""))
+	for g.clk.Now().Before(end) {
+		g.pass(5 * time.Second)
+		if strings.Contains(slugs(g, "fp-srv_b"), "db-main") && g.clk.Now().Before(end) {
+			t.Fatalf("two writers: the database started on srv_b %s before srv_a's lease ran out", end.Sub(g.clk.Now()))
+		}
+	}
+	// The announcement covers the longest fence an agent may keep, so the move waits a little past the lease.
+	g.pass(2 * time.Minute)
+	if placed(g, "db_1") != "srv_b" {
+		t.Fatalf("the database never moved once the lease had run out: %q", placed(g, "db_1"))
+	}
+}
+
+// Every member hears an extension may come before any is given: one that does not answer means none is.
+func TestADrainExtendsNoLeaseWhileAMemberDoesNotHearTheAnnouncement(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64"), "srv_c": roomy("amd64")})
+	f.pass(10 * time.Second)
+	f.ms.cut["fp-srv_c"] = true
+	f.l.Drain(context.Background())
+	for _, fp := range []string{"fp-srv_a", "fp-srv_b"} {
+		if o := f.lastOrder(fp); o.ExtendSeconds != 0 || o.Announce == 0 {
+			t.Fatalf("%s was last told %+v, want the announcement and no extension", fp, o)
+		}
+	}
+	delete(f.ms.cut, "fp-srv_c")
+	f.l.Drain(context.Background())
+	f.ms.mu.Lock()
+	defer f.ms.mu.Unlock()
+	for _, fp := range []string{"fp-srv_a", "fp-srv_b", "fp-srv_c"} {
+		os := f.ms.orders[fp]
+		if len(os) < 2 || os[len(os)-1].ExtendSeconds == 0 || os[len(os)-2].Announce == 0 || os[len(os)-2].ExtendSeconds != 0 {
+			t.Fatalf("%s: want the announcement, then the extension", fp)
+		}
+	}
+}

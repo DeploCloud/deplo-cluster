@@ -60,7 +60,7 @@ func (c *cluster) leftBy(kind, id string, now time.Time) (from, why string) {
 		}
 		return from, ""
 	}
-	if m := c.members[from]; m != nil && (!m.stopped(now) || m.presumedAlive(now) || now.Before(c.extended[from].Add(fenceMargin))) {
+	if m := c.members[from]; m != nil && (!c.stopped(m, now) || c.presumedAlive(m, now) || now.Before(c.extended[from].Add(fenceMargin))) {
 		return from, StillAnswering
 	}
 	return from, ""

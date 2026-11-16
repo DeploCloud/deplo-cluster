@@ -66,17 +66,34 @@ type members struct {
 	extra   map[string]int
 	// stoppedWithin is what a member says of its own fence, in seconds; zero is an older member.
 	stoppedWithin map[string]int
+	// witness are members that count what leaders say of extensions, as a newer agent does, and say how long one
+	// may still keep a lease of the cluster alive; shortFence ones keep to the fence their order gives.
+	witness, shortFence    map[string]bool
+	announced, unannounced map[string]time.Time
+	fence                  map[string]int
 }
 
 // leaseEnd is when the lease a member holds runs out, as its agent counts it.
 func (m *members) leaseEnd(fp string) time.Time {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.renewed[fp].Add(lease.FenceAfter + time.Duration(m.extra[fp])*time.Second)
+	fence := lease.FenceAfter
+	if m.shortFence[fp] && m.fence[fp] > 0 {
+		fence = time.Duration(m.fence[fp]) * time.Second
+	}
+	return m.renewed[fp].Add(fence + time.Duration(m.extra[fp])*time.Second)
+}
+
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, stoppedWithin: map[string]int{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{}}
+	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, stoppedWithin: map[string]int{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{},
+		witness: map[string]bool{}, shortFence: map[string]bool{}, announced: map[string]time.Time{}, unannounced: map[string]time.Time{}, fence: map[string]int{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -119,6 +136,7 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 			if m.now != nil {
 				m.renewed[to.Fingerprint], m.extra[to.Fingerprint] = m.now(), o.ExtendSeconds
 			}
+			m.fence[to.Fingerprint] = o.FenceSeconds
 			if o.Return {
 				r.Returned = m.returned[to.Fingerprint]
 			} else if len(o.Keep) > 0 {
@@ -142,6 +160,17 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 					r = lease.Reply{Error: "the standby copy could not be promoted"}
 				}
 			}
+		}
+		if fp := to.Fingerprint; r.OK && m.witness[fp] && m.now != nil {
+			now := m.now()
+			if !o.Probe && !o.Announces {
+				m.unannounced[fp] = laterOf(m.unannounced[fp], now.Add(lease.FenceAfter+lease.ExtendFor))
+			}
+			if o.Announce > 0 {
+				m.announced[fp] = laterOf(m.announced[fp], now.Add(time.Duration(o.Announce)*time.Second))
+			}
+			u := max(int(laterOf(m.announced[fp], m.unannounced[fp]).Sub(now).Seconds()+0.999), 0)
+			r.Unsure = &u
 		}
 		takes, hook := m.restoreTakes, m.onStart
 		m.mu.Unlock()

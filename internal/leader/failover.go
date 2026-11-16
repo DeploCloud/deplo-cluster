@@ -55,7 +55,7 @@ func (c *cluster) mayBeHeld(w *Waiting, now time.Time) bool {
 		return false
 	}
 	for _, m := range c.members {
-		if m.presumedAlive(now) {
+		if c.presumedAlive(m, now) {
 			return true
 		}
 	}
@@ -528,7 +528,7 @@ func (c *cluster) mayStart(kind, id string, replica int, from string, waited boo
 	if m == nil {
 		return entry, ""
 	}
-	held := m.presumedAlive(now) || now.Before(c.extended[from].Add(fenceMargin)) || !m.stopped(now)
+	held := c.presumedAlive(m, now) || now.Before(c.extended[from].Add(fenceMargin)) || !c.stopped(m, now)
 	if now.Sub(m.lastAck) < FailoverAfter || (entry.SingleWriter && held) {
 		return entry, StillAnswering
 	}
@@ -723,7 +723,7 @@ func (l *Leader) Failover(ctx context.Context) {
 			}
 			// What must never run twice waits until the member has stopped it, and for a lease this or another
 			// leader may have extended: it moves in a second pass once both are over.
-			held := m.presumedAlive(now) || now.Before(c.extended[mid].Add(fenceMargin)) || !m.stopped(now)
+			held := c.presumedAlive(m, now) || now.Before(c.extended[mid].Add(fenceMargin)) || !c.stopped(m, now)
 			again := c.moved[mid]
 			if again && (held || !m.heldBack) {
 				continue
@@ -742,7 +742,7 @@ func (l *Leader) Failover(ctx context.Context) {
 			}
 			c.moved[mid], m.heldBack = true, held
 			if !held {
-				m.presumed = time.Time{}
+				m.other = time.Time{}
 			}
 			jobs = append(jobs, failoverJob{id, mid, es})
 		}
@@ -796,15 +796,34 @@ func (l *Leader) withItsDatabase(clusterID string, c *cluster, e lease.Entry) bo
 	return false
 }
 
-// presumedAlive says whether a lease another leader gave this member may still be running, margin included.
-func (m *member) presumedAlive(now time.Time) bool {
-	return now.Before(m.presumed.Add(fenceMargin))
+// presumedAlive says whether a lease another leader gave this member may still be running, margin included. Until
+// a member vouches that no extension can, that is the longest one; then what the members say, or the plain lease.
+func (c *cluster) presumedAlive(m *member, now time.Time) bool {
+	if m.other.IsZero() {
+		return false
+	}
+	end := m.other.Add(c.leaseFor(m))
+	if !c.vouched {
+		end = end.Add(lease.ExtendFor)
+	} else if c.unsure.After(end) {
+		end = c.unsure
+	}
+	return now.Before(end.Add(fenceMargin))
+}
+
+// leaseFor is the longest lease another leader may have given a member, extensions aside: the short one only
+// while a member vouches that its leaders announce, and Deplo that its agent keeps to the fence it is given.
+func (c *cluster) leaseFor(m *member) time.Duration {
+	if c.vouched && m.ShortFence {
+		return lease.FenceFor
+	}
+	return lease.FenceAfter
 }
 
 // stopped says a silent member has surely stopped its single-writer workloads by now, by its own word or an
 // older member's fence.
-func (m *member) stopped(now time.Time) bool {
-	within := lease.FenceAfter + fenceMargin
+func (c *cluster) stopped(m *member, now time.Time) bool {
+	within := c.leaseFor(m) + fenceMargin
 	if m.stoppedWithin > 0 {
 		within = m.stoppedWithin
 	}
@@ -934,5 +953,9 @@ func (l *Leader) Drain(ctx context.Context) {
 		c.sure = time.Time{}
 	}
 	l.mu.Unlock()
-	l.round(ctx, lease.ExtendFor)
+	l.exchange(ctx, pass{probe: true})
+	// Every member hears an extension may come before any is given, so a leader that takes over learns of it from
+	// whichever member it reaches; a cluster where one does not answer gets none.
+	told := l.exchange(ctx, pass{announce: true})
+	l.exchange(ctx, pass{extend: lease.ExtendFor, only: told})
 }

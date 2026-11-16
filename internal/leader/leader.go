@@ -66,14 +66,16 @@ type Member struct {
 	NoFailover bool `json:"noFailover,omitempty"`
 	// NoRestore is a member whose agent cannot restore a backup before a start: it is given no workload that needs one.
 	NoRestore bool `json:"noRestore,omitempty"`
+	// ShortFence is a member whose agent keeps to the fence its leader gives it, as Deplo knows from its version.
+	ShortFence bool `json:"shortFence,omitempty"`
 }
 
 type member struct {
 	Member
 	lastAck time.Time
 	state   lease.State
-	// presumed is when the longest lease another leader may have given it runs out; zero once it answered this one.
-	presumed time.Time
+	// other is the latest renewal another leader may have sent it; zero once it answered this one.
+	other time.Time
 	// stoppedWithin is the member's own word on how soon after a renewal its fence is done; zero is an older one.
 	stoppedWithin time.Duration
 	// heldBack is a failover that left the single-writer workloads for a second pass.
@@ -90,6 +92,10 @@ type cluster struct {
 	// standbys are the copies that follow a workload from another member: never moved, promoted at most.
 	standbys   []lease.Entry
 	superseded bool
+	// vouched is a member having said, at this epoch, how long an extension may keep a lease alive: unsure is the
+	// latest such end any member named.
+	vouched bool
+	unsure  time.Time
 	// moved marks a silent member whose workloads were already dealt with, until it answers again.
 	moved map[string]bool
 	// returning marks a member that came back from that, until it has said what it removed.
@@ -256,6 +262,7 @@ func (l *Leader) SetRoster(r Roster) error {
 	if again {
 		c.auth, c.waiting, c.moved = map[string]authority{}, map[string]*Waiting{}, map[string]bool{}
 		c.sure, c.deplo = time.Time{}, time.Time{}
+		c.vouched, c.unsure = false, time.Time{}
 	}
 	now := l.cfg.Now()
 	next := map[string]*member{}
@@ -265,7 +272,7 @@ func (l *Leader) SetRoster(r Roster) error {
 			next[m.ID] = old
 			continue
 		}
-		next[m.ID] = &member{Member: m, lastAck: now, state: lease.OK, presumed: now.Add(lease.FenceAfter + lease.ExtendFor)}
+		next[m.ID] = &member{Member: m, lastAck: now, state: lease.OK, other: now}
 	}
 	for id := range c.left {
 		if next[id] == nil {
@@ -415,20 +422,29 @@ func (l *Leader) Tick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	l.round(ctx, 0)
+	l.round(ctx)
 	l.settle()
 }
 
 // round asks the members of every cluster this leader is not sure it leads, then sends its orders where a
-// quorum answered. extend is the longer lease of a drain; the caller holds l.tickMu.
-func (l *Leader) round(ctx context.Context, extend time.Duration) {
-	l.exchange(ctx, true, 0)
-	l.exchange(ctx, false, extend)
+// quorum answered. The caller holds l.tickMu.
+func (l *Leader) round(ctx context.Context) {
+	l.exchange(ctx, pass{probe: true})
+	l.exchange(ctx, pass{})
+}
+
+// pass is one exchange: a probe, a renewal that may announce an extension, or one that extends, to only some clusters.
+type pass struct {
+	probe, announce bool
+	extend          time.Duration
+	only            map[string]bool
 }
 
 // exchange sends one order to every member of the clusters that are due it: a probe where this leader is not
-// sure it leads, a renewal where it is. A quorum of answers makes it sure for SureFor.
-func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration) {
+// sure it leads, a renewal where it is. A quorum of answers makes it sure for SureFor. It says which clusters
+// had every member answer.
+func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
+	probe, extend := p.probe, p.extend
 	// id and fingerprint are read here, under the lock: a roster may replace them while the order is on its way.
 	type job struct {
 		cluster, id, fingerprint string
@@ -440,7 +456,7 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 	now := l.cfg.Now()
 	l.mu.Lock()
 	for id, c := range l.clusters {
-		if c.superseded || c.leads(now) == probe {
+		if c.superseded || c.leads(now) == probe || p.only != nil && !p.only[id] {
 			continue
 		}
 		epochs[id] = c.epoch
@@ -448,6 +464,9 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe}
 			if !probe {
 				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told()), c.owesReturn(m.ID), int(extend/time.Second)
+			}
+			if p.announce {
+				o.Announce = int(lease.AnnounceFor / time.Second)
 			}
 			if extend > 0 {
 				// Kept before the order leaves: a member that took it and whose answer was lost is extended all the same.
@@ -478,6 +497,14 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 	for id := range answered {
 		heard[id]++
 	}
+	sent := map[string]int{}
+	for _, j := range jobs {
+		sent[j.cluster]++
+	}
+	all := map[string]bool{}
+	for id, n := range heard {
+		all[id] = n == sent[id]
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for id, n := range heard {
@@ -492,11 +519,12 @@ func (l *Leader) exchange(ctx context.Context, probe bool, extend time.Duration)
 		// It was not sure until now, so an older leader may have extended a lease meanwhile: a member this one
 		// never heard holds the longest one again, counted as from a roster one renewal before this round.
 		for _, m := range c.members {
-			if at := now.Add(lease.FenceAfter + lease.ExtendFor - lease.RenewEvery); !m.presumed.IsZero() && m.presumed.Before(at) {
-				m.presumed = at
+			if at := now.Add(-lease.RenewEvery); !m.other.IsZero() && m.other.Before(at) {
+				m.other = at
 			}
 		}
 	}
+	return all
 }
 
 // renew sends one order and says whether the member took it at this leader's epoch.
@@ -516,6 +544,17 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 	r, err := lease.Send(c, o)
 	if err != nil {
 		return false
+	}
+	if r.OK && r.Unsure != nil {
+		l.mu.Lock()
+		if cl := l.clusters[clusterID]; cl != nil && cl.epoch == o.Epoch {
+			// Zero is no extension alive: only a later end moves the one already known.
+			cl.vouched = true
+			if u := l.cfg.Now().Add(time.Duration(*r.Unsure) * time.Second); *r.Unsure > 0 && u.After(cl.unsure) {
+				cl.unsure = u
+			}
+		}
+		l.mu.Unlock()
 	}
 	if r.Error == lease.StaleEpoch {
 		l.mu.Lock()
@@ -545,7 +584,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 	m.lastAck, m.stoppedWithin = l.cfg.Now(), time.Duration(r.StoppedWithin)*time.Second
 	// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
 	if o.ExtendSeconds == 0 {
-		m.presumed = time.Time{}
+		m.other = time.Time{}
 	}
 	if cl := l.clusters[clusterID]; cl != nil && o.ExtendSeconds == 0 && !cl.extended[id].IsZero() {
 		delete(cl.extended, id)
@@ -585,7 +624,8 @@ func (l *Leader) settle() {
 		for _, mid := range mids {
 			m := c.members[mid]
 			s := lease.StateAfter(now.Sub(m.lastAck))
-			if s == lease.NotResponding && m.stoppedWithin > 0 && now.Sub(m.lastAck) >= m.stoppedWithin {
+			// Fenced as soon as its work may move: by the member's own word, or by what the members vouch for.
+			if s == lease.NotResponding && (m.stoppedWithin > 0 || c.vouched) && c.stopped(m, now) && !c.presumedAlive(m, now) {
 				s = lease.Fenced
 			}
 			if s != m.state {

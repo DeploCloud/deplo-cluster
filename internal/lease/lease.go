@@ -28,6 +28,9 @@ const (
 	// ExtendFor is how long a planned restart of the leader buys every member, and the most a member honours.
 	// A leader waits it out for a member it never heard, so raise it here first and in deplo-agent last.
 	ExtendFor = 5 * time.Minute
+	// AnnounceFor is what an announcement of an extension says a lease may still live: the extension round that
+	// follows it, the longest fence and the extension.
+	AnnounceFor = 10*time.Second + FenceAfter + ExtendFor
 )
 
 // State is how a member looks from the leader.
@@ -78,6 +81,10 @@ type Order struct {
 	// FenceSeconds is how long the lease lives without the next renewal; an older leader never sets it, and its
 	// member keeps FenceAfter.
 	FenceSeconds int `json:"fenceSeconds,omitempty"`
+	// Announces is a leader that extends no lease before every member took its announcement of the extension.
+	Announces bool `json:"announces,omitempty"`
+	// Announce says a lease of this cluster may live this many seconds more because of an extension that follows.
+	Announce int `json:"announce,omitempty"`
 	// Probe only asks whether the member takes this epoch. It renews nothing and tells the member nothing else,
 	// and a member that answers refuses every older epoch from then on.
 	Probe bool `json:"probe,omitempty"`
@@ -216,6 +223,9 @@ const StaleEpoch = "stale_epoch"
 
 // Reply is a member's answer; on StaleEpoch, Epoch is the one it holds.
 type Reply struct {
+	// Unsure is how many seconds a lease of this cluster may still live because of an extension, as far as the
+	// member can tell; nil is an older member.
+	Unsure *int `json:"unsure,omitempty"`
 	// Started is true only when a Start order ran and the workload came up; an older member never sets it.
 	Started bool `json:"started,omitempty"`
 	// Restored is true only when the Start order's backup was restored; an older member never sets it.
@@ -250,7 +260,7 @@ var ErrStale = errors.New("a member holds a newer epoch")
 // Send writes the order and reads the member's reply on one stream.
 func Send(c io.ReadWriter, o Order) (Reply, error) {
 	if !o.Probe {
-		o.FenceSeconds = int(FenceFor / time.Second)
+		o.FenceSeconds, o.Announces = int(FenceFor/time.Second), true
 	}
 	raw, err := json.Marshal(o)
 	if err != nil {
