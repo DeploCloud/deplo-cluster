@@ -290,3 +290,33 @@ func TestADrainExtendsNoLeaseWhileAMemberDoesNotHearTheAnnouncement(t *testing.T
 		}
 	}
 }
+
+// deplo#241: the leader before moved db-main to srv_b, which runs it, and Deplo had not heard yet when the lead moved
+// on. The leader that takes over learns it from srv_b's answer to its probe, before it renews anyone: db-main stays on
+// srv_b, and no order ever places it back on srv_a, where an old copy would start next to it.
+func TestATakeoverKeepsAWriterOnTheMemberThatRunsIt(t *testing.T) {
+	f := two(t)
+	f.putDB(t, "db_1", "db-main", backup(""))
+	f.pass(2 * time.Second)
+	epoch := f.l.Snapshot().Clusters["clu_1"].Epoch
+	picture := snapshotRoster(f, epoch+1)
+	f.ms.mu.Lock()
+	f.ms.running["fp-srv_b"] = []lease.Writer{{Slug: "db-main", Epoch: epoch}}
+	f.ms.running["fp-srv_a"] = []lease.Writer{{Slug: "db-main", Epoch: epoch - 1}}
+	f.ms.mu.Unlock()
+	g := takeOverWith(t, f, picture)
+	g.putDB(t, "db_1", "db-main", backup(""))
+	g.pass(3 * time.Second)
+	if got := placed(g, "db_1"); got != "srv_b" {
+		t.Fatalf("db-main placed on %s, want srv_b, which runs it at the newest epoch", got)
+	}
+	g.ms.mu.Lock()
+	defer g.ms.mu.Unlock()
+	for _, o := range g.ms.orders["fp-srv_a"] {
+		for _, e := range o.Placement {
+			if o.Epoch > epoch && e.Slug == "db-main" && e.Member == "srv_a" {
+				t.Fatalf("an order at epoch %d placed db-main on srv_a: %+v", o.Epoch, o.Placement)
+			}
+		}
+	}
+}
