@@ -87,7 +87,7 @@ const (
 
 // promote has the standby's member promote the copy and start the workload's stack over it. Nothing is restored.
 // gate is asked right before the order leaves, like any start.
-func (l *Leader) promote(ctx context.Context, clusterID, kind, id string, replica int, from, to string, b bundles.Bundle, gate func(*cluster) string) promotion {
+func (l *Leader) promote(ctx context.Context, clusterID, kind, id string, replica int, from, to string, b bundles.Bundle, gate func(*cluster) string, auto bool) promotion {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil || !c.leads(l.cfg.Now()) || c.members[to] == nil {
@@ -113,6 +113,7 @@ func (l *Leader) promote(ctx context.Context, clusterID, kind, id string, replic
 	fp := c.members[to].Fingerprint
 	key := entryKey(kind, id, replica)
 	c.starting[key] = true
+	check := c.found(auto, kind, id, replica, from)
 	l.mu.Unlock()
 
 	if err := l.sendStart(ctx, fp, order); err != nil {
@@ -122,7 +123,7 @@ func (l *Leader) promote(ctx context.Context, clusterID, kind, id string, replic
 	}
 	entry.Member = to
 	// The copy's memory was already counted on its member.
-	if !l.commit(clusterID, entry, 0, from, nil, 0, true, order.Epoch) {
+	if l.commit(clusterID, entry, 0, from, nil, 0, true, order.Epoch, check) != "" {
 		return notNow
 	}
 	return promoteOK

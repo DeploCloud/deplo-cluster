@@ -23,6 +23,7 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 	if c == nil || !c.owesReturn(memberID) {
 		return func() {}
 	}
+	cleanup := c.dropped[memberID] && !c.moved[memberID] && len(c.left[memberID]) == 0
 	var back []lease.Entry
 	if c.moved[memberID] {
 		delete(c.moved, memberID)
@@ -54,11 +55,15 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 			}
 		}
 		delete(c.left, memberID)
+		delete(c.dropped, memberID)
 	}
 	l.saveFailover()
 	return func() {
 		tell()
-		if data != nil {
+		switch {
+		case data != nil && cleanup:
+			l.cfg.Logf("deplo-cluster: %s removed the copies of the moves that were dropped: %v", memberID, stopped)
+		case data != nil:
 			l.log.Append("member_returned", clusterID, data)
 		}
 	}

@@ -31,7 +31,26 @@ const (
 	maxStartTries = 3
 	// StoppedAnswering is the reason a failover event carries.
 	StoppedAnswering = "stopped_answering"
+	// DefaultStartGrace is how long after a leader starts a member it has not heard yet waits for it: after a power
+	// cut, servers come back minutes apart, and a slower one has not stopped answering (deplo-cluster#5).
+	DefaultStartGrace = 2 * time.Minute
+	// NotHeardYet is why the work of such a member waits.
+	NotHeardYet = "not_heard_yet"
+	// SourceAnswered and the two below are why a move that was started is not recorded: see recheck.
+	SourceAnswered   = "source_answered"
+	PlacementChanged = "placement_changed"
+	TargetGone       = "target_gone"
 )
+
+// unknown says this leader started a moment ago and has not heard the member yet: it may still be booting, so it
+// counts as neither answering nor silent. The caller holds l.mu.
+func (l *Leader) unknown(m *member, now time.Time) bool {
+	grace := l.cfg.StartGrace
+	if grace == 0 {
+		grace = DefaultStartGrace
+	}
+	return m != nil && !m.heard && now.Sub(l.started) < grace
+}
 
 // Waiting is a workload that found no room, and the member it left.
 type Waiting struct {
@@ -69,18 +88,22 @@ type persisted struct {
 	Auth      map[string]authority            `json:"auth"`
 	Extended  map[string]time.Time            `json:"extended,omitempty"`
 	Returning map[string]bool                 `json:"returning,omitempty"`
+	Dropped   map[string]bool                 `json:"dropped,omitempty"`
 	Left      map[string]map[string]time.Time `json:"left,omitempty"`
 	Kept      map[string]map[string]time.Time `json:"kept,omitempty"`
 }
 
 func (l *Leader) newCluster(id string) *cluster {
-	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}, left: map[string]map[string]time.Time{}, kept: map[string]map[string]time.Time{}, starting: map[string]bool{}}
+	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, dropped: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}, left: map[string]map[string]time.Time{}, kept: map[string]map[string]time.Time{}, starting: map[string]bool{}}
 	if p, ok := l.restored[id]; ok {
 		if p.Extended != nil {
 			c.extended = p.Extended
 		}
 		if p.Returning != nil {
 			c.returning = p.Returning
+		}
+		if p.Dropped != nil {
+			c.dropped = p.Dropped
 		}
 		if p.Left != nil {
 			c.left = p.Left
@@ -122,7 +145,7 @@ func (l *Leader) saveFailover() {
 		out[id] = p
 	}
 	for id, c := range l.clusters {
-		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended, Returning: c.returning, Left: c.left, Kept: c.kept}
+		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended, Returning: c.returning, Dropped: c.dropped, Left: c.left, Kept: c.kept}
 	}
 	l.keep("failover.json", out)
 }
@@ -393,13 +416,17 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		if asked != nil {
 			return ""
 		}
-		_, why := c.mayStart(kind, id, replica, from, waited, l.cfg.Now())
+		now := l.cfg.Now()
+		if !waited && l.unknown(c.members[from], now) {
+			return NotHeardYet
+		}
+		_, why := c.mayStart(kind, id, replica, from, waited, now)
 		return why
 	}
 	// A standby copy that follows the workload is promoted where it is; only when that fails is a backup restored.
 	promoteFailed := false
 	if sb := l.standbyFor(clusterID, kind, id, from); sb != "" && b.Promote != nil {
-		switch l.promote(ctx, clusterID, kind, id, replica, from, sb, b, gate) {
+		switch l.promote(ctx, clusterID, kind, id, replica, from, sb, b, gate, asked == nil) {
 		case promoteOK:
 			l.noteDatabaseEnv(clusterID, kind, sb, meta.Environment)
 			return outcome{member: sb}
@@ -431,7 +458,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		if why := gate(c); why != "" {
 			l.mu.Unlock()
-			return outcome{skipped: true, again: why == StillAnswering, why: why}
+			return outcome{skipped: true, again: why == StillAnswering || why == NotHeardYet, why: why}
 		}
 		// What keeps data never starts empty: without a backup to restore it waits for its member. One whose standby
 		// could not be promoted is stuck, and says so: it waits, and the promotion is tried again (deplo#242).
@@ -482,6 +509,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		fp := target.Fingerprint
 		key := entryKey(kind, id, replica)
 		c.starting[key] = true
+		check := c.found(asked == nil, kind, id, replica, from)
 		l.mu.Unlock()
 
 		began := time.Now()
@@ -496,8 +524,8 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		entry.Kind, entry.ID, entry.Replica = kind, id, replica
 		entry.Member = ans.Member
-		if !l.commit(clusterID, entry, placement.Needed(w), from, b.Restore, time.Since(began), false, order.Epoch) {
-			return outcome{skipped: true, why: NotLeading}
+		if why := l.commit(clusterID, entry, placement.Needed(w), from, b.Restore, time.Since(began), false, order.Epoch, check); why != "" {
+			return outcome{skipped: true, why: why}
 		}
 		l.noteDatabaseEnv(clusterID, kind, ans.Member, meta.Environment)
 		return outcome{member: ans.Member}
@@ -577,18 +605,22 @@ func (l *Leader) noteDatabaseEnv(clusterID, kind, member, env string) {
 
 // commit records where a workload now runs, takes its memory off that member and tells the control plane. A
 // start that outlived this leader's epoch is not recorded: the cluster is another leader's to describe.
-func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string, restored *bundles.Restore, took time.Duration, promoted bool, epoch uint64) bool {
+func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string, restored *bundles.Restore, took time.Duration, promoted bool, epoch uint64, check *recheck) string {
 	l.mu.Lock()
 	c := l.clusters[clusterID]
 	if c == nil {
 		l.mu.Unlock()
-		return false
+		return NotLeading
 	}
 	delete(c.starting, entryKey(e.Kind, e.ID, e.Replica))
 	if c.superseded || c.epoch != epoch {
 		l.mu.Unlock()
 		l.cfg.Logf("deplo-cluster: %s started %s for epoch %d, which this leader no longer leads: not recorded", e.Member, e.Slug, epoch)
-		return false
+		return NotLeading
+	}
+	stale := c.stale(check, e)
+	if stale != "" && !e.SingleWriter {
+		return l.drop(c, clusterID, e, from, stale)
 	}
 	if _, ok := c.place(e.Kind, e.ID, e.Replica, e.Member); !ok {
 		c.placement = append(c.placement, e)
@@ -609,6 +641,11 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 	if promoted {
 		a.Promoted, moved["promoted"] = true, true
 	}
+	// What must never run twice is recorded all the same: see recheck.
+	if stale != "" {
+		moved["stale"] = stale
+		l.cfg.Logf("deplo-cluster: %s took %s over, then %s; recorded, since %s had stopped it before the start", e.Member, e.Slug, staleSentence(stale, from), from)
+	}
 	c.auth[key] = a
 	delete(c.waiting, key)
 	c.noteLeft(from, e, a.At)
@@ -619,7 +656,82 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 	l.tellPlacement(clusterID, e.Kind, e.ID, members, epoch)
 	ev := l.log.Append("failed_over", clusterID, moved)
 	l.stamp(clusterID, key, ev.Seq)
-	return true
+	return ""
+}
+
+// recheck is what an automatic move found when it decided, read again once its start is over (deplo-cluster#5):
+// the member it leaves answered since, the workload is placed elsewhere now, or the member it started on left.
+// A workload that may run twice then does not move, and its new copy is removed. One that must never run twice is
+// recorded anyway: its member had stopped it before the start, and handing it back while the new copy still runs
+// would make two writers.
+type recheck struct {
+	from string
+	// ack is that member's last answer, and on where the workload was placed, when the move was decided.
+	ack time.Time
+	on  string
+}
+
+// found is what an automatic move finds before its start; nil for a person's move. The caller holds l.mu.
+func (c *cluster) found(auto bool, kind, id string, replica int, from string) *recheck {
+	if !auto {
+		return nil
+	}
+	r := &recheck{from: from}
+	if m := c.members[from]; m != nil {
+		r.ack = m.lastAck
+	}
+	for _, p := range c.placement {
+		if p.Kind == kind && p.ID == id && p.Replica == replica {
+			r.on = p.Member
+		}
+	}
+	return r
+}
+
+// stale says why a move no longer is what its decision found; "" when it still is. The caller holds l.mu.
+func (c *cluster) stale(r *recheck, e lease.Entry) string {
+	if r == nil {
+		return ""
+	}
+	if c.members[e.Member] == nil {
+		return TargetGone
+	}
+	on, named := "", false
+	for _, p := range c.placement {
+		if p.Kind == e.Kind && p.ID == e.ID && p.Replica == e.Replica {
+			on, named = p.Member, true
+		}
+	}
+	if !named || on != r.on {
+		return PlacementChanged
+	}
+	if m := c.members[r.from]; m != nil && m.lastAck.After(r.ack) {
+		return SourceAnswered
+	}
+	return ""
+}
+
+func staleSentence(why, from string) string {
+	switch why {
+	case SourceAnswered:
+		return from + " answered again"
+	case PlacementChanged:
+		return "it was placed elsewhere meanwhile"
+	}
+	return "the server it started on left the cluster"
+}
+
+// drop leaves a move unrecorded and has the member that took its start remove that copy, the way a returning
+// member removes what runs elsewhere. The caller holds l.mu; drop releases it.
+func (l *Leader) drop(c *cluster, clusterID string, e lease.Entry, from, why string) string {
+	if c.members[e.Member] != nil {
+		c.returning[e.Member], c.dropped[e.Member] = true, true
+	}
+	l.saveFailover()
+	l.mu.Unlock()
+	l.cfg.Logf("deplo-cluster: %s started %s, then %s: the move is dropped, and %s removes its copy", e.Member, e.Slug, staleSentence(why, from), e.Member)
+	l.log.Append("move_dropped", clusterID, map[string]any{"kind": e.Kind, "workloadId": e.ID, "from": from, "to": e.Member, "reason": why})
+	return why
 }
 
 // stamp notes which event told the control plane about a move, so one that missed the event can tell.
@@ -724,6 +836,13 @@ func (l *Leader) Failover(ctx context.Context) {
 			m := c.members[mid]
 			// A lease extended before a restart may still be alive on a member this leader has not heard since.
 			if now.Sub(m.lastAck) < FailoverAfter {
+				continue
+			}
+			if l.unknown(m, now) {
+				if !m.waitedUnknown {
+					m.waitedUnknown = true
+					l.cfg.Logf("deplo-cluster: %s has not answered since this leader started %s ago: its work waits, it may still be starting", mid, now.Sub(l.started).Round(time.Second))
+				}
 				continue
 			}
 			// What must never run twice waits until the member has stopped it, and for a lease this or another

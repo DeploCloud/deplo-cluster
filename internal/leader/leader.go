@@ -50,6 +50,9 @@ type Config struct {
 	Bundles *bundles.Store
 	// PathOK says whether this leader can still reach the relays. A leader that lost its own path moves nothing.
 	PathOK func() bool
+	// StartGrace is how long after this leader starts a member it has not heard yet is unknown, not silent: 0 is
+	// DefaultStartGrace, below 0 none.
+	StartGrace time.Duration
 }
 
 // Member is a server of the cluster and the certificate it dials with. The rest is what the control plane last
@@ -75,6 +78,9 @@ type member struct {
 	Member
 	lastAck time.Time
 	state   lease.State
+	// heard is a member that has answered this leader since it started; until then, see unknown. waitedUnknown
+	// is its work waiting for that, said once.
+	heard, waitedUnknown bool
 	// other is the latest renewal another leader may have sent it; zero once it answered this one.
 	other time.Time
 	// stoppedWithin is the member's own word on how soon after a renewal its fence is done; zero is an older one.
@@ -103,6 +109,8 @@ type cluster struct {
 	moved map[string]bool
 	// returning marks a member that came back from that, until it has said what it removed.
 	returning map[string]bool
+	// dropped marks a member asked the same to remove the copy of a move that was not recorded: see recheck.
+	dropped map[string]bool
 	// left is, per member, the single-writer workloads that moved off it and when, until it has said what it
 	// did with its copies: what it is told to save, and the time its backups are labelled with.
 	left map[string]map[string]time.Time
@@ -176,6 +184,8 @@ type Leader struct {
 	// pending is the moves a person asked for, made by the next failover pass.
 	// ponytail: kept in memory, so a leader that restarts first forgets the ask and the person asks again.
 	pending []pendingMove
+	// started is when this leader started: see unknown.
+	started time.Time
 }
 
 // New returns a leader; Run starts renewing.
@@ -191,7 +201,7 @@ func New(cfg Config) *Leader {
 		_ = os.MkdirAll(cfg.StateDir, 0o700)
 		file = filepath.Join(cfg.StateDir, "events.jsonl")
 	}
-	l := &Leader{cfg: cfg, log: events.Open(file, MaxEvents, cfg.Now), clusters: map[string]*cluster{}, epochs: map[string]uint64{}}
+	l := &Leader{cfg: cfg, log: events.Open(file, MaxEvents, cfg.Now), clusters: map[string]*cluster{}, epochs: map[string]uint64{}, started: cfg.Now()}
 	if cfg.StateDir != "" {
 		raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "epochs.json"))
 		if err == nil {
@@ -644,7 +654,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 		return r.OK
 	}
 	l.mu.Lock()
-	m.lastAck, m.stoppedWithin = l.cfg.Now(), time.Duration(r.StoppedWithin)*time.Second
+	m.lastAck, m.stoppedWithin, m.heard = l.cfg.Now(), time.Duration(r.StoppedWithin)*time.Second, true
 	// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
 	if o.ExtendSeconds == 0 {
 		m.other = time.Time{}

@@ -57,7 +57,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	leaderSocket := fs.String("leader-socket", envOr("DEPLO_CLUSTER_SOCKET", ""), "leader: unix socket the agent forwards calls on")
 	relays := fs.String("relays-file", envOr("DEPLO_CLUSTER_RELAYS_FILE", ""), "leader: file listing the relays to dial, one address per line")
 	meshSocket := fs.String("mesh-socket", envOr("DEPLO_CLUSTER_MESH_SOCKET", ""), "leader: unix socket of the agent's way onto the cluster's network")
+	startGrace := fs.String("start-grace", envOr("DEPLO_CLUSTER_START_GRACE", "0"), "leader: how long after it starts a member it has not heard yet may still be booting (0 is 2m, below 0 none)")
 	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	grace, err := time.ParseDuration(*startGrace)
+	if err != nil {
+		fmt.Fprintln(stderr, "--start-grace:", err)
 		return 2
 	}
 	status := cluster.Status{Role: role}
@@ -74,12 +80,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	return runLeader(ctx, identity, *cert != "" && *relays != "", *relays, *leaderSocket, *stateDir, *meshSocket, logger)
+	return runLeader(ctx, identity, *cert != "" && *relays != "", *relays, *leaderSocket, *stateDir, *meshSocket, grace, logger)
 }
 
 // runLeader answers the agent on its local socket and renews every member's lease: through the cluster's network
 // when the agent beside it is on it, and through the relays beside that.
-func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dial bool, relays, socket, stateDir, meshSocket string, logger *log.Logger) int {
+func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dial bool, relays, socket, stateDir, meshSocket string, grace time.Duration, logger *log.Logger) int {
 	var p *party.Party
 	door := newMeshDoor(meshSocket)
 	// The party outlives ctx by one drain: the last renewals still need its connections.
@@ -114,10 +120,11 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 			}
 			return p.Dial(ctx, to)
 		},
-		StateDir: stateDir,
-		Logf:     logger.Printf,
-		Bundles:  store,
-		PathOK:   func() bool { return p != nil && (p.Connected() > 0 || door.up()) },
+		StateDir:   stateDir,
+		Logf:       logger.Printf,
+		Bundles:    store,
+		PathOK:     func() bool { return p != nil && (p.Connected() > 0 || door.up()) },
+		StartGrace: grace,
 	})
 	// A planned restart extends every lease first, so no member fences itself while this leader is away.
 	defer func() {
