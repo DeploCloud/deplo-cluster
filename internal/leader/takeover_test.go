@@ -29,7 +29,8 @@ func takeOverWith(t *testing.T, f *fo, picture leader.Roster, cutOff ...string) 
 	for _, id := range cutOff {
 		g.blind[id] = true
 	}
-	g.l = leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store, PathOK: func() bool { return g.pathOK }})
+	// Deplo's machine runs its leader all along: a takeover is a new epoch, not a start, so no start grace.
+	g.l = leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store, PathOK: func() bool { return g.pathOK }, StartGrace: -1})
 	if err := g.l.SetRoster(picture); err != nil {
 		t.Fatal(err)
 	}

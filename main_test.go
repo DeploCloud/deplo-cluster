@@ -112,6 +112,13 @@ func TestRelayTakesARosterOnItsSocketAndAnswersOnlyItsPath(t *testing.T) {
 	}
 }
 
+func TestAStartGraceThatIsNoDurationIsRefused(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"--start-grace", "soon"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "--start-grace") {
+		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
+}
+
 func TestUnknownModeIsRefused(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"bogus"}, &out, &errb); code != 2 {
