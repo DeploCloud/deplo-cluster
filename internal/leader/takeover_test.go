@@ -29,7 +29,7 @@ func takeOverWith(t *testing.T, f *fo, picture leader.Roster, cutOff ...string) 
 	for _, id := range cutOff {
 		g.blind[id] = true
 	}
-	g.l = leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store, PathOK: func() bool { return g.pathOK }})
+	g.l = leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store, PathOK: func() bool { return g.pathOK }, Logf: g.logf})
 	if err := g.l.SetRoster(picture); err != nil {
 		t.Fatal(err)
 	}
@@ -319,4 +319,31 @@ func TestATakeoverKeepsAWriterOnTheMemberThatRunsIt(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A member whose agent is too old to say what it runs keeps the roster's placement, as before, and the leader says so.
+func TestATakeoverKeepsTheRosterForAMemberTooOldToSayWhatItRuns(t *testing.T) {
+	f := two(t)
+	f.putDB(t, "db_1", "db-main", backup(""))
+	f.pass(2 * time.Second)
+	epoch := f.l.Snapshot().Clusters["clu_1"].Epoch
+	picture := snapshotRoster(f, epoch+1)
+	f.ms.mu.Lock()
+	f.ms.old["fp-srv_b"], f.ms.old["fp-srv_a"] = true, true
+	f.ms.running["fp-srv_b"] = []lease.Writer{{Slug: "db-main", Epoch: epoch}}
+	f.ms.mu.Unlock()
+	g := takeOverWith(t, f, picture)
+	g.putDB(t, "db_1", "db-main", backup(""))
+	g.pass(3 * time.Second)
+	if got := placed(g, "db_1"); got != "srv_a" {
+		t.Fatalf("db-main placed on %s, want srv_a as the roster says: srv_b's agent said nothing", got)
+	}
+	g.logMu.Lock()
+	defer g.logMu.Unlock()
+	for _, line := range g.logged {
+		if strings.Contains(line, "srv_b's server agent does not say what it runs") {
+			return
+		}
+	}
+	t.Fatalf("no line says srv_b keeps the roster: %q", g.logged)
 }

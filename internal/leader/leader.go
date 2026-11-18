@@ -637,6 +637,9 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 			l.mu.Lock()
 			m.running = r.Running
 			l.mu.Unlock()
+			if o.Probe && !r.Reports {
+				l.cfg.Logf("deplo-cluster: %s's server agent does not say what it runs: the roster stands for its writers", id)
+			}
 		}
 		return r.OK
 	}

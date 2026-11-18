@@ -246,6 +246,9 @@ type Reply struct {
 	// Running answers a probe: the single-writer stacks the member runs that its lease placed there, and that
 	// lease's epoch. A leader that takes over keeps each where it runs, the newest epoch first (deplo#241).
 	Running []Writer `json:"running,omitempty"`
+	// Reports says the member answers a probe with Running, also when it runs nothing: a leader keeps the roster
+	// for a member that does not, as before.
+	Reports bool `json:"reports,omitempty"`
 	// Later answers a Keep sent after the return, once the member keeps nothing of a stack any more.
 	Later *Later `json:"later,omitempty"`
 }
