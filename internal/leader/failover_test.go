@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +31,15 @@ type fo struct {
 	blind map[string]bool
 	// away is Deplo down, or cut off from this leader: no beat reaches it.
 	away bool
+	// logged is what the leader logged, when a test asked for it.
+	logMu  sync.Mutex
+	logged []string
+}
+
+func (f *fo) logf(format string, args ...any) {
+	f.logMu.Lock()
+	defer f.logMu.Unlock()
+	f.logged = append(f.logged, fmt.Sprintf(format, args...))
 }
 
 // step is one renewal and one failover pass, after Deplo's beat when Deplo reaches this leader.

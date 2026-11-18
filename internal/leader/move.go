@@ -15,8 +15,10 @@ const (
 	Unreadable     = "unreadable"
 	NotPlaced      = "not_placed"
 	NotLeading     = "not_leading"
-	NoPath         = "no_path"
-	StartFailed    = "start_failed"
+	// RunsThere is a writer a leader that took over kept on the member that runs it (deplo#241).
+	RunsThere   = "runs_there"
+	NoPath      = "no_path"
+	StartFailed = "start_failed"
 )
 
 // MoveRequest asks for one workload that waits for its member to be brought up elsewhere. Sealed is its bundle

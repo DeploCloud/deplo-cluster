@@ -33,8 +33,12 @@ func (c *clock) Add(d time.Duration) {
 
 // members answers a leader's renewals the way an agent does, by fingerprint; absent is a member cut off.
 type members struct {
-	mu     sync.Mutex
-	epoch  map[string]uint64 // fingerprint -> the epoch it holds
+	mu    sync.Mutex
+	epoch map[string]uint64 // fingerprint -> the epoch it holds
+	// running is what a member answers a probe with: the writers it runs and the epoch that placed them.
+	running map[string][]lease.Writer
+	// old are members whose agent is too old to say what it runs.
+	old    map[string]bool
 	cut    map[string]bool
 	orders map[string][]lease.Order
 	// starts are the start orders each member was given; refuse makes a member fail them.
@@ -92,7 +96,7 @@ func laterOf(a, b time.Time) time.Time {
 }
 
 func newMembers() *members {
-	return &members{epoch: map[string]uint64{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, stoppedWithin: map[string]int{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{},
+	return &members{epoch: map[string]uint64{}, running: map[string][]lease.Writer{}, old: map[string]bool{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, stoppedWithin: map[string]int{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{},
 		witness: map[string]bool{}, shortFence: map[string]bool{}, announced: map[string]time.Time{}, unannounced: map[string]time.Time{}, fence: map[string]int{}}
 }
 
@@ -129,6 +133,9 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 		} else if o.Probe {
 			m.epoch[to.Fingerprint] = o.Epoch
 			m.probes[to.Fingerprint] = append(m.probes[to.Fingerprint], o)
+			if !m.old[to.Fingerprint] {
+				r.Running, r.Reports = m.running[to.Fingerprint], true
+			}
 		} else {
 			m.epoch[to.Fingerprint] = o.Epoch
 			m.orders[to.Fingerprint] = append(m.orders[to.Fingerprint], o)

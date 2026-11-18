@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -83,6 +84,8 @@ type member struct {
 	// startsOut are the start orders on their way to it, startEnded when the last one was over.
 	startsOut  int
 	startEnded time.Time
+	// running is what the member said it runs when this leader last probed it: see keepWhereRunning.
+	running []lease.Writer
 }
 
 type cluster struct {
@@ -461,6 +464,9 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		}
 		epochs[id] = c.epoch
 		for _, m := range c.members {
+			if probe {
+				m.running = nil
+			}
 			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe}
 			if !probe {
 				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told()), c.owesReturn(m.ID), int(extend/time.Second)
@@ -505,8 +511,8 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 	for id, n := range heard {
 		all[id] = n == sent[id]
 	}
+	var tells []func()
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	for id, n := range heard {
 		c := l.clusters[id]
 		if c == nil || c.superseded || c.epoch != epochs[id] || !c.quorum(n, now) {
@@ -523,8 +529,57 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 				m.other = at
 			}
 		}
+		tells = append(tells, l.keepWhereRunning(id, c)...)
+	}
+	l.mu.Unlock()
+	for _, tell := range tells {
+		tell()
 	}
 	return all
+}
+
+// keepWhereRunning places each single-writer workload on the member that runs it, the newest epoch first, before
+// this leader's first renewal: Deplo's roster can lag what the leader before moved, and a writer moved back to
+// where it ran before runs twice (deplo#241). The caller holds l.mu; what it returns tells once l.mu is released.
+func (l *Leader) keepWhereRunning(clusterID string, c *cluster) []func() {
+	newest, runners := map[string]uint64{}, map[string][]string{}
+	for id, m := range c.members {
+		for _, w := range m.running {
+			switch {
+			case w.Epoch > newest[w.Slug] || runners[w.Slug] == nil:
+				newest[w.Slug], runners[w.Slug] = w.Epoch, []string{id}
+			case w.Epoch == newest[w.Slug]:
+				runners[w.Slug] = append(runners[w.Slug], id)
+			}
+		}
+		m.running = nil
+	}
+	var tells []func()
+	for i, e := range c.placement {
+		on := runners[e.Slug]
+		if !e.SingleWriter || e.Slug == "" || len(on) == 0 || slices.Contains(on, e.Member) {
+			continue
+		}
+		slices.Sort(on)
+		from := e.Member
+		c.placement[i].Member = on[0]
+		e = c.placement[i]
+		key := entryKey(e.Kind, e.ID, e.Replica)
+		c.auth[key] = authority{At: l.cfg.Now(), Entry: e, Told: Told{From: from, Reason: RunsThere}}
+		delete(c.waiting, key)
+		members, epoch := replicaMembers(c.placement, e.Kind, e.ID), c.epoch
+		moved := map[string]any{"kind": e.Kind, "workloadId": e.ID, "from": from, "to": e.Member, "reason": RunsThere}
+		tells = append(tells, func() {
+			l.cfg.Logf("deplo-cluster: %s runs on %s: kept there, not placed on %q as the roster says", e.Slug, e.Member, from)
+			l.tellPlacement(clusterID, e.Kind, e.ID, members, epoch)
+			ev := l.log.Append("failed_over", clusterID, moved)
+			l.stamp(clusterID, key, ev.Seq)
+		})
+	}
+	if len(tells) > 0 {
+		l.saveFailover()
+	}
+	return tells
 }
 
 // renew sends one order and says whether the member took it at this leader's epoch.
@@ -578,6 +633,14 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 	}
 	// A probe renewed nothing: the member's lease is as old as it was.
 	if !r.OK || o.Probe {
+		if r.OK {
+			l.mu.Lock()
+			m.running = r.Running
+			l.mu.Unlock()
+			if o.Probe && !r.Reports {
+				l.cfg.Logf("deplo-cluster: %s's server agent does not say what it runs: the roster stands for its writers", id)
+			}
+		}
 		return r.OK
 	}
 	l.mu.Lock()
