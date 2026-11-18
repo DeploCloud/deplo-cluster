@@ -397,6 +397,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		return why
 	}
 	// A standby copy that follows the workload is promoted where it is; only when that fails is a backup restored.
+	promoteFailed := false
 	if sb := l.standbyFor(clusterID, kind, id, from); sb != "" && b.Promote != nil {
 		switch l.promote(ctx, clusterID, kind, id, replica, from, sb, b, gate) {
 		case promoteOK:
@@ -405,7 +406,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		case notNow:
 			return outcome{skipped: true, again: true, why: StillAnswering}
 		}
-		exclude[sb] = true
+		exclude[sb], promoteFailed = true, true
 	}
 	for try := 0; try < maxStartTries; try++ {
 		l.mu.Lock()
@@ -432,9 +433,13 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 			l.mu.Unlock()
 			return outcome{skipped: true, again: why == StillAnswering, why: why}
 		}
-		// What keeps data never starts empty: without a backup to restore it waits for its member.
+		// What keeps data never starts empty: without a backup to restore it waits for its member. One whose standby
+		// could not be promoted is stuck, and says so: it waits, and the promotion is tried again (deplo#242).
 		if entry.SingleWriter && b.Restore == nil {
 			l.mu.Unlock()
+			if promoteFailed {
+				return outcome{refusal: &placement.Refusal{Reason: StartFailed, NeededMB: placement.Needed(placement.Workload{LimitMB: meta.LimitMB, PeakMB: meta.PeakMB}), Cluster: clusterID, Workload: id}}
+			}
 			return outcome{skipped: true}
 		}
 		// Replicas kept on one member move as one stack: the first is started, the rest follow it.
