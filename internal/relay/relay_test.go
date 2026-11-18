@@ -27,16 +27,20 @@ type fixture struct {
 
 func newFixture(t *testing.T, limit relay.Limit) *fixture {
 	t.Helper()
+	return newFixtureWith(t, relay.Config{Limit: limit})
+}
+
+// newFixtureWith gives the relay its identity and state file; cfg sets everything else.
+func newFixtureWith(t *testing.T, cfg relay.Config) *fixture {
+	t.Helper()
 	ca := testpki.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	self := ca.Leaf(t, "relay")
 	state := t.TempDir() + "/rosters.json"
-	r := relay.New(relay.Config{
-		Identity:  func() (*wire.Identity, error) { return self, nil },
-		StateFile: state,
-		Limit:     limit,
-	})
+	cfg.Identity = func() (*wire.Identity, error) { return self, nil }
+	cfg.StateFile = state
+	r := relay.New(cfg)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return &fixture{t: t, ca: ca, relay: r, srv: srv, ctx: ctx, stateFile: state}
@@ -418,10 +422,7 @@ func TestAForgedForwardedAddressSpendsNobodyElsesBudget(t *testing.T) {
 
 // A party's streams each cost the relay a goroutine and a buffer: one party cannot open them without end.
 func TestOnePartyCannotHoldMoreStreamsThanTheCap(t *testing.T) {
-	was := relay.MaxStreams
-	relay.MaxStreams = 2
-	t.Cleanup(func() { relay.MaxStreams = was })
-	f := newFixture(t, relay.Limit{})
+	f := newFixtureWith(t, relay.Config{MaxStreams: 2})
 	a, b := f.ca.Leaf(t, "a"), f.ca.Leaf(t, "b")
 	ma, mb := f.join(a, wire.RoleMember), f.join(b, wire.RoleLeader)
 	f.relay.SetRoster("clu_1", []wire.Party{ma.wire, mb.wire})
