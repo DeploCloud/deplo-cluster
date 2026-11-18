@@ -480,7 +480,12 @@ func TestARestartedLeaderStillFailsOverWithoutTheControlPlane(t *testing.T) {
 		t.Fatalf("a restarted leader forgot its cluster: %q", placed(f, "prj_1"))
 	}
 	f.ms.cut["fp-srv_a"] = true
-	f.pass(90 * time.Second)
+	// It has not heard srv_a since it started: srv_a may still be booting, until the start grace is over.
+	f.pass(leader.DefaultStartGrace - 10*time.Second)
+	if placed(f, "prj_1") != "srv_a" || len(f.ms.starts["fp-srv_b"]) != 0 {
+		t.Fatalf("moved within the start grace, to %q", placed(f, "prj_1"))
+	}
+	f.pass(20 * time.Second)
 	if placed(f, "prj_1") != "srv_b" || len(f.ms.starts["fp-srv_b"]) != 1 {
 		t.Fatalf("placed on %q after a restart", placed(f, "prj_1"))
 	}
