@@ -39,7 +39,9 @@ type Config struct {
 	// StateFile keeps the rosters across a restart; empty keeps them in memory only.
 	StateFile string
 	Limit     Limit
-	Logf      func(format string, args ...any)
+	// MaxStreams caps the streams one party holds open at once; 0 means DefaultMaxStreams.
+	MaxStreams int
+	Logf       func(format string, args ...any)
 }
 
 // Relay is the door and the roster behind it.
@@ -72,6 +74,9 @@ func New(cfg Config) *Relay {
 	}
 	if cfg.Limit.Max == 0 {
 		cfg.Limit = DefaultLimit
+	}
+	if cfg.MaxStreams == 0 {
+		cfg.MaxStreams = DefaultMaxStreams
 	}
 	r := &Relay{
 		cfg:      cfg,
@@ -198,9 +203,9 @@ func (r *Relay) load() {
 	}
 }
 
-// MaxStreams is how many streams one party may hold open at a time; one more is closed unanswered.
+// DefaultMaxStreams is how many streams one party may hold open at a time; one more is closed unanswered.
 // ponytail: every connection an App holds to a database on another member is one, so the cap is generous.
-var MaxStreams = 4096
+const DefaultMaxStreams = 4096
 
 var yamuxConfig = func() *yamux.Config {
 	c := yamux.DefaultConfig()
@@ -262,7 +267,7 @@ func (r *Relay) hold(req *http.Request, ws *websocket.Conn) {
 		return
 	}
 	defer r.unregister(s)
-	slots := make(chan struct{}, MaxStreams)
+	slots := make(chan struct{}, r.cfg.MaxStreams)
 	for {
 		st, err := mux.AcceptStream()
 		if err != nil {
