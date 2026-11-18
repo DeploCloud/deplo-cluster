@@ -160,14 +160,37 @@ func TestAStandbyThatCannotBePromotedFallsBackToTheBackupOnAnotherMember(t *test
 	if st := f.ms.starts["fp-srv_c"]; len(st) != 1 || st[0].Start.Restore == nil || st[0].Start.Promote != nil {
 		t.Fatalf("srv_c's start orders: %+v", st)
 	}
-	// With no backup either, the database waits for its member: an empty one never starts.
+	// With no backup either, an empty one never starts: the database waits, and the failover says it did not start
+	// on another server rather than nothing at all (deplo#242). The promotion is tried again, and works once it can.
 	g := withStandby(t, "srv_b", nil, abc())
 	g.ms.unpromoted["fp-srv_b"] = true
 	g.ms.cut["fp-srv_a"] = true
 	g.pass(120 * time.Second)
-	if placed(g, "db_1") != "srv_a" || len(g.ms.starts["fp-srv_c"]) != 0 {
+	if placed(g, "db_1") == "srv_c" || len(g.ms.starts["fp-srv_c"]) != 0 {
 		t.Fatalf("a database with neither standby nor backup moved to %q", placed(g, "db_1"))
 	}
+	if !strings.Contains(failoverWaiting(t, g), `"workloadId":"db_1","reason":"start_failed"`) {
+		t.Fatalf("the failover did not say the database is stuck: %s", failoverWaiting(t, g))
+	}
+	g.ms.unpromoted["fp-srv_b"] = false
+	g.pass(60 * time.Second)
+	if placed(g, "db_1") != "srv_b" {
+		t.Fatalf("database on %q after the standby could be promoted again, want srv_b", placed(g, "db_1"))
+	}
+}
+
+// failoverWaiting is every failover event's waiting list, as the control plane reads it.
+func failoverWaiting(t *testing.T, f *fo) string {
+	t.Helper()
+	ev, _ := f.l.Events().Since(0)
+	var out []string
+	for _, e := range ev {
+		if e.Type == "failover" {
+			raw, _ := json.Marshal(e.Data)
+			out = append(out, string(raw))
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func TestAStandbyIsNeverMovedOrStartedWhenItsOwnMemberStops(t *testing.T) {
