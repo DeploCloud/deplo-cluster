@@ -343,7 +343,7 @@ func (l *Leader) startOrder(b bundles.Bundle) *lease.Start {
 	}
 	st := &lease.Start{DeploymentID: b.DeploymentID, Slug: s.Slug, ProjectID: s.ProjectID, ImageRef: s.ImageRef, ComposeYAML: s.ComposeYAML,
 		Network: s.Network, Env: s.Env, RegistryAuth: auth, ComposeUpArgs: s.ComposeUpArgs, Ready: s.Ready, RestartRule: s.RestartRule,
-		StartAfterReady: s.StartAfterReady, Mounts: mounts, FilesBindSources: s.FilesBindSources}
+		StartAfterReady: s.StartAfterReady, Mounts: mounts, FilesBindSources: s.FilesBindSources, Certificates: b.Certificates}
 	if r := b.Restore; r != nil {
 		st.Restore = &lease.Restore{BackupID: r.BackupID, TakenAt: r.TakenAt, Request: r.Request}
 	}

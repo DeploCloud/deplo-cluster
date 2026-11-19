@@ -118,6 +118,8 @@ type Bundle struct {
 	Promote *Promote `json:"promote,omitempty"`
 	// Keep is set for a workload that keeps data and has a destination for it.
 	Keep *Keep `json:"keep,omitempty"`
+	// Certificates are the App's own for its domains that answer on every server (ADR-0048); passed on unread.
+	Certificates json.RawMessage `json:"certificates,omitempty"`
 }
 
 // Held is one stored bundle as the list shows it.
