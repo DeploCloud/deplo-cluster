@@ -29,6 +29,8 @@ type fo struct {
 	dir    string
 	// blind are the members a split keeps this leader from, by id; they are alive all the same.
 	blind map[string]bool
+	// certs is the certificates put bundles carry, as JSON.
+	certs string
 	// away is Deplo down, or cut off from this leader: no beat reaches it.
 	away bool
 	// logged is what the leader logged, when a test asked for it.
@@ -88,7 +90,11 @@ func startFO(t *testing.T, mem map[string]leader.Member) *fo {
 
 func (f *fo) put(t *testing.T, id, slug, created string, domain bool) {
 	t.Helper()
-	b := bundles.Bundle{V: 1, Kind: "app", Workload: id, DeploymentID: "dep_" + id, Stack: bundles.Stack{Slug: slug, ComposeYAML: "services: {}", Env: map[string]string{"K": "v"}}}
+	b := bundles.Bundle{V: 1, Kind: "app", Workload: id, DeploymentID: "dep_" + id, Stack: bundles.Stack{Slug: slug, ComposeYAML: "services: {}", Env: map[string]string{"K": "v"}},
+		Certificates: json.RawMessage(nil)}
+	if f.certs != "" {
+		b.Certificates = json.RawMessage(f.certs)
+	}
 	rec, _ := age.ParseX25519Recipient(f.store.PublicKey())
 	var out bytes.Buffer
 	w, _ := age.Encrypt(&out, rec)
@@ -131,6 +137,26 @@ func placed(f *fo, id string) string {
 		}
 	}
 	return "?"
+}
+
+// An App's certificates reach the member it moves to exactly as Deplo sealed them (ADR-0048).
+func TestAMovedAppTakesItsCertificatesUnread(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64")})
+	f.certs = `[{"cert":"-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n","key":"k","later":1}]`
+	f.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
+	f.assign(t, "prj_1", "web", "srv_a")
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(6 * time.Second)
+	got := f.ms.starts["fp-srv_b"]
+	if len(got) != 1 {
+		t.Fatalf("start orders %+v", got)
+	}
+	var want, have any
+	_ = json.Unmarshal([]byte(f.certs), &want)
+	_ = json.Unmarshal(got[0].Start.Certificates, &have)
+	if fmt.Sprint(want) != fmt.Sprint(have) {
+		t.Fatalf("the member got %s", got[0].Start.Certificates)
+	}
 }
 
 func TestAStatelessAppMovesAfter5sOfSilence(t *testing.T) {
