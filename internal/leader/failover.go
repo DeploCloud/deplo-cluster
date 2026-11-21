@@ -892,6 +892,9 @@ func (l *Leader) Failover(ctx context.Context) {
 	for _, m := range moves {
 		l.runMove(ctx, m)
 	}
+	for _, c := range l.copiesToGive() {
+		l.copyBack(ctx, c)
+	}
 }
 
 func (l *Leader) startsTo(o lease.Order, n int) {

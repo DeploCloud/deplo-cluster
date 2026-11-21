@@ -92,6 +92,8 @@ type member struct {
 	startEnded time.Time
 	// running is what the member said it runs when this leader last probed it: see keepWhereRunning.
 	running []lease.Writer
+	// upSince is when it last began answering after a silence: copyBack waits for GiveCopyAfter of it.
+	upSince time.Time
 }
 
 type cluster struct {
@@ -377,6 +379,7 @@ type Assign struct {
 	ID           string   `json:"id"`
 	Slug         string   `json:"slug"`
 	SingleWriter bool     `json:"singleWriter"`
+	Balanced     bool     `json:"balanced,omitempty"`
 	Members      []string `json:"members"`
 }
 
@@ -400,7 +403,7 @@ func (l *Leader) Assign(a Assign) error {
 		}
 	}
 	for i, m := range a.Members {
-		kept = append(kept, lease.Entry{Kind: a.Kind, ID: a.ID, Replica: i, Member: m, Slug: a.Slug, SingleWriter: a.SingleWriter})
+		kept = append(kept, lease.Entry{Kind: a.Kind, ID: a.ID, Replica: i, Member: m, Slug: a.Slug, SingleWriter: a.SingleWriter, Balanced: a.Balanced})
 	}
 	c.placement = kept
 	epoch := c.epoch
@@ -654,6 +657,9 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 		return r.OK
 	}
 	l.mu.Lock()
+	if now := l.cfg.Now(); m.upSince.IsZero() || now.Sub(m.lastAck) >= lease.NotRespondingAfter {
+		m.upSince = now
+	}
 	m.lastAck, m.stoppedWithin, m.heard = l.cfg.Now(), time.Duration(r.StoppedWithin)*time.Second, true
 	// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
 	if o.ExtendSeconds == 0 {
