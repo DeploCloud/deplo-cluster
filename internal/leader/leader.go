@@ -134,12 +134,41 @@ type cluster struct {
 	deplo time.Time
 	// starting is the workloads a start order is out for, until it has an outcome.
 	starting map[string]bool
+	// gone is the members silent past GoneAfter that no longer count for a majority, and since when (ADR-0049).
+	gone map[string]time.Time
+}
+
+// GoneAfter is how long a member is silent before the others stop counting it. It is longer than a cut-off member
+// takes to fence itself (FenceAfter for an older agent, plus fenceMargin), so it stopped its writers by then.
+const GoneAfter = 2 * time.Minute
+
+// voters is the members that count for a majority: every member but the gone ones.
+func (c *cluster) voters() int {
+	n := 0
+	for id := range c.members {
+		if _, out := c.gone[id]; !out {
+			n++
+		}
+	}
+	return n
+}
+
+// goneFingerprints is the certificates of the gone members, which every renewal names.
+func (c *cluster) goneFingerprints() []string {
+	var out []string
+	for id := range c.gone {
+		if m := c.members[id]; m != nil {
+			out = append(out, m.Fingerprint)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // quorum says whether that many members answering let this leader lead: more than half of them, or exactly
 // half while the control plane names its epoch. The other half's leader has no such word, so only one leads.
 func (c *cluster) quorum(heard int, now time.Time) bool {
-	n := len(c.members)
+	n := c.voters()
 	return heard*2 > n || (heard > 0 && heard*2 == n && now.Sub(c.deplo) < DeploFor)
 }
 
@@ -497,6 +526,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		cluster, id, fingerprint string
 		m                        *member
 		order                    lease.Order
+		votes                    bool
 	}
 	var jobs []job
 	epochs := map[string]uint64{}
@@ -518,11 +548,13 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			if p.announce {
 				o.Announce = int(lease.AnnounceFor / time.Second)
 			}
+			o.Gone = c.goneFingerprints()
 			if extend > 0 {
 				// Kept before the order leaves: a member that took it and whose answer was lost is extended all the same.
 				c.extended[m.ID] = now.Add(lease.FenceAfter + extend)
 			}
-			jobs = append(jobs, job{id, m.ID, m.Fingerprint, m, o})
+			_, out := c.gone[m.ID]
+			jobs = append(jobs, job{id, m.ID, m.Fingerprint, m, o, !out})
 		}
 	}
 	if extend > 0 {
@@ -536,7 +568,8 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if l.renew(ctx, j.cluster, j.id, j.fingerprint, j.m, j.order) {
+			// A gone member is renewed but does not vote until it is back and caught up.
+			if l.renew(ctx, j.cluster, j.id, j.fingerprint, j.m, j.order) && j.votes {
 				answered <- j.cluster
 			}
 		}()
@@ -549,7 +582,9 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 	}
 	sent := map[string]int{}
 	for _, j := range jobs {
-		sent[j.cluster]++
+		if j.votes {
+			sent[j.cluster]++
+		}
 	}
 	all := map[string]bool{}
 	for id, n := range heard {
@@ -714,6 +749,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 func (l *Leader) settle() {
 	type change struct{ cluster, member, state string }
 	var out []change
+	saved := false
 	now := l.cfg.Now()
 	l.mu.Lock()
 	ids := make([]string, 0, len(l.clusters))
@@ -743,11 +779,45 @@ func (l *Leader) settle() {
 				out = append(out, change{id, mid, string(s)})
 			}
 		}
+		for _, mid := range mids {
+			if ev := c.regroup(mid, now); ev != "" {
+				saved = true
+				out = append(out, change{id, mid, ev})
+			}
+		}
+	}
+	if saved {
+		l.saveFailover()
 	}
 	l.mu.Unlock()
 	for _, c := range out {
+		if c.state == "gone" || c.state == "rejoined" {
+			l.log.Append("member_"+c.state, c.cluster, map[string]string{"member": c.member})
+			continue
+		}
 		l.log.Append("member_state", c.cluster, map[string]string{"member": c.member, "state": c.state})
 	}
+}
+
+// regroup takes a member silent past GoneAfter out of the majority while this leader leads the others, and counts
+// it again once it has answered for GiveCopyAfter and said what it removed. It names what changed, or "".
+func (c *cluster) regroup(mid string, now time.Time) string {
+	m := c.members[mid]
+	if _, out := c.gone[mid]; out {
+		if now.Sub(m.lastAck) < lease.NotRespondingAfter && !m.upSince.IsZero() && now.Sub(m.upSince) >= GiveCopyAfter && !c.returning[mid] {
+			delete(c.gone, mid)
+			return "rejoined"
+		}
+		return ""
+	}
+	if !m.heard || now.Sub(m.lastAck) < GoneAfter || !c.leads(now) || c.voters() < 2 {
+		return ""
+	}
+	if c.gone == nil {
+		c.gone = map[string]time.Time{}
+	}
+	c.gone[mid] = now
+	return "gone"
 }
 
 // Run renews leases every lease.RenewEvery until ctx ends.

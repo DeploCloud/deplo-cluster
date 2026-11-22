@@ -91,6 +91,7 @@ type persisted struct {
 	Dropped   map[string]bool                 `json:"dropped,omitempty"`
 	Left      map[string]map[string]time.Time `json:"left,omitempty"`
 	Kept      map[string]map[string]time.Time `json:"kept,omitempty"`
+	Gone      map[string]time.Time            `json:"gone,omitempty"`
 }
 
 func (l *Leader) newCluster(id string) *cluster {
@@ -117,6 +118,7 @@ func (l *Leader) newCluster(id string) *cluster {
 		if p.Auth != nil {
 			c.auth = p.Auth
 		}
+		c.gone = p.Gone
 		delete(l.restored, id)
 	}
 	return c
@@ -145,7 +147,7 @@ func (l *Leader) saveFailover() {
 		out[id] = p
 	}
 	for id, c := range l.clusters {
-		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended, Returning: c.returning, Dropped: c.dropped, Left: c.left, Kept: c.kept}
+		out[id] = persisted{Waiting: c.waiting, Auth: c.auth, Extended: c.extended, Returning: c.returning, Dropped: c.dropped, Left: c.left, Kept: c.kept, Gone: c.gone}
 	}
 	l.keep("failover.json", out)
 }
@@ -234,7 +236,9 @@ func (c *cluster) memberFacts(now time.Time) []placement.Member {
 	out := make([]placement.Member, 0, len(ids))
 	for _, id := range ids {
 		m := c.members[id]
-		live := now.Sub(m.lastAck) < lease.NotRespondingAfter
+		_, isGone := c.gone[id]
+		// A gone member hosts nothing until it counts again.
+		live := now.Sub(m.lastAck) < lease.NotRespondingAfter && !isGone
 		out = append(out, placement.Member{ID: id, Online: live, Leased: live, Emptying: m.Emptying, Arch: m.Arch,
 			Images: m.Images, FreeMB: m.FreeMB, Workloads: len(placed[id]), DatabaseEnvs: m.DatabaseEnvs, Placed: placed[id]})
 	}
@@ -511,6 +515,8 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		c.starting[key] = true
 		check := c.found(asked == nil, kind, id, replica, from)
 		l.mu.Unlock()
+		// Deplo shows the workload moving from here until its new member answers (ADR-0049).
+		l.log.Append("moving", clusterID, map[string]any{"kind": kind, "workloadId": id, "from": from, "to": ans.Member})
 
 		began := time.Now()
 		if err := l.sendStart(ctx, fp, order); err != nil {
@@ -824,11 +830,11 @@ func (l *Leader) Failover(ctx context.Context) {
 			mids = append(mids, mid)
 			if now.Sub(m.lastAck) < lease.NotRespondingAfter {
 				delete(c.moved, mid)
-			} else {
+			} else if _, out := c.gone[mid]; !out {
 				silent++
 			}
 		}
-		if silent*2 > len(c.members) {
+		if silent*2 > c.voters() {
 			continue
 		}
 		sort.Strings(mids)
