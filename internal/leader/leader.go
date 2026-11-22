@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DeploCloud/deplo-cluster/internal/bundles"
@@ -188,6 +189,8 @@ type Leader struct {
 	pending []pendingMove
 	// started is when this leader started: see unknown.
 	started time.Time
+	// rotations are every roster's key rotations, read by the party without the lock.
+	rotations atomic.Pointer[[]wire.Rotation]
 }
 
 // New returns a leader; Run starts renewing.
@@ -248,6 +251,25 @@ type Roster struct {
 	Placement []lease.Entry `json:"placement"`
 	// Standbys are the standby copies, each on another member than its workload; an older leader ignores them.
 	Standbys []lease.Entry `json:"standbys,omitempty"`
+	// Rotations are its members' key rotations (ADR-0050): a member named by an old certificate answers with its new.
+	Rotations []wire.Rotation `json:"rotations,omitempty"`
+}
+
+// Rotations is every key rotation the rosters announced, for the party that dials members.
+func (l *Leader) Rotations() []wire.Rotation {
+	if rs := l.rotations.Load(); rs != nil {
+		return *rs
+	}
+	return nil
+}
+
+// keepRotations gathers what every roster announced; the caller holds l.mu.
+func (l *Leader) keepRotations() {
+	var all []wire.Rotation
+	for _, c := range l.clusters {
+		all = append(all, c.roster.Rotations...)
+	}
+	l.rotations.Store(&all)
 }
 
 // SetRoster replaces a cluster's members and placement. An epoch older than the one held is refused, and a
@@ -258,6 +280,11 @@ func (l *Leader) SetRoster(r Roster) error {
 	}
 	if r.Epoch == 0 {
 		r.Epoch = 1
+	}
+	for _, rot := range r.Rotations {
+		if from, to := (wire.Party{Fingerprint: rot.From, Role: wire.RoleMember}), (wire.Party{Fingerprint: rot.To, Role: wire.RoleMember}); !from.Valid() || !to.Valid() || rot.From == rot.To {
+			return fmt.Errorf("%q to %q is not a key rotation", rot.From, rot.To)
+		}
 	}
 	l.mu.Lock()
 	held := l.epochs[r.Cluster]
@@ -282,7 +309,9 @@ func (l *Leader) SetRoster(r Roster) error {
 	now := l.cfg.Now()
 	next := map[string]*member{}
 	for _, m := range r.Members {
-		if old := c.members[m.ID]; old != nil && old.Fingerprint == m.Fingerprint && !again {
+		// A member that rotated its key is still the member it was.
+		if old := c.members[m.ID]; old != nil && !again &&
+			(old.Fingerprint == m.Fingerprint || slices.Contains(wire.Successors(r.Rotations, old.Fingerprint), m.Fingerprint)) {
 			old.Member = m
 			next[m.ID] = old
 			continue
@@ -314,6 +343,7 @@ func (l *Leader) SetRoster(r Roster) error {
 		l.saveEpochs()
 	}
 	c.roster = r
+	l.keepRotations()
 	l.saveRosters()
 	l.mu.Unlock()
 	if changed {
@@ -338,6 +368,7 @@ func (l *Leader) Forget(clusterID string) error {
 	delete(l.clusters, clusterID)
 	delete(l.epochs, clusterID)
 	delete(l.restored, clusterID)
+	l.keepRotations()
 	l.saveEpochs()
 	l.saveRosters()
 	l.saveFailover()

@@ -91,6 +91,8 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 	// The party outlives ctx by one drain: the last renewals still need its connections.
 	partyCtx, stopParty := context.WithCancel(context.Background())
 	defer stopParty()
+	// The leader is made below; the party reads its rotations only once it runs.
+	var l *leader.Leader
 	if dial {
 		p = party.New(party.Config{
 			Role:      wire.RoleLeader,
@@ -98,11 +100,11 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 			Transport: relayTransport,
 			Relays:    func() []string { return readLines(relays) },
 			// Members never open a stream to the leader; only the leader sends orders.
-			Accept: func(_ wire.Party, c net.Conn) { c.Close() },
-			Direct: door.dial,
-			Logf:   logger.Printf,
+			Accept:    func(_ wire.Party, c net.Conn) { c.Close() },
+			Direct:    door.dial,
+			Rotations: func() []wire.Rotation { return l.Rotations() },
+			Logf:      logger.Printf,
 		})
-		go p.Run(partyCtx)
 	}
 	var store *bundles.Store
 	if stateDir != "" {
@@ -113,7 +115,7 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 		}
 		store = s
 	}
-	l := leader.New(leader.Config{
+	l = leader.New(leader.Config{
 		Dial: func(ctx context.Context, to wire.Party) (net.Conn, error) {
 			if p == nil {
 				return nil, errors.New("this leader has no certificate or relay to reach members with")
@@ -126,6 +128,9 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 		PathOK:     func() bool { return p != nil && (p.Connected() > 0 || door.up()) },
 		StartGrace: grace,
 	})
+	if p != nil {
+		go p.Run(partyCtx)
+	}
 	// A planned restart extends every lease first, so no member fences itself while this leader is away.
 	defer func() {
 		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
