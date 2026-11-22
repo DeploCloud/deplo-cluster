@@ -356,6 +356,13 @@ func (l *Leader) startOrder(b bundles.Bundle) *lease.Start {
 
 // sendStart gives one member the order to bring a workload up and waits for it to answer.
 func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error {
+	// A start renews the member's lease too, so it names the gone members as every renewal does: without them the
+	// member's name server would count a gone one again until the next renewal (seen on cluster eu).
+	l.mu.Lock()
+	if c := l.clusters[o.Cluster]; c != nil {
+		o.Gone = c.goneFingerprints()
+	}
+	l.mu.Unlock()
 	// A start renews the member's lease too, when it lands: until it is over, its fence counts from its end.
 	l.startsTo(o, 1)
 	defer l.startsTo(o, -1)

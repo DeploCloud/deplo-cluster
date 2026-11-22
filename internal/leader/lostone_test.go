@@ -36,6 +36,13 @@ func TestAMemberGonePastTheGraceStopsCountingSoTheLastOneTakesTheWork(t *testing
 	if got := placed(f, "prj_1"); got != "srv_a" {
 		t.Fatalf("web is on %q", got)
 	}
+	// The start renews srv_a's lease too, so it names the gone member as every renewal does.
+	f.ms.mu.Lock()
+	starts := f.ms.starts["fp-srv_a"]
+	f.ms.mu.Unlock()
+	if len(starts) == 0 || !slices.Equal(starts[len(starts)-1].Gone, []string{"fp-srv_c"}) {
+		t.Fatalf("the start order names gone %v", starts)
+	}
 }
 
 // With Deplo unreachable during the second loss, nothing moves: one of two is no majority without its word.
