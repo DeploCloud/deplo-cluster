@@ -1,6 +1,9 @@
 package leader_test
 
 import (
+	"context"
+	"errors"
+	"net"
 	"slices"
 	"testing"
 	"time"
@@ -9,6 +12,7 @@ import (
 	evlog "github.com/DeploCloud/deplo-cluster/internal/events"
 	"github.com/DeploCloud/deplo-cluster/internal/leader"
 	"github.com/DeploCloud/deplo-cluster/internal/lease"
+	"github.com/DeploCloud/deplo-cluster/internal/wire"
 )
 
 // withLine is a roster for the leader on self, with srv_b then srv_c as heirs, and agents that pre-vote.
@@ -190,5 +194,53 @@ func TestAStandbyRosterOutlivesARestart(t *testing.T) {
 	}
 	if err := leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: t.TempDir()}).Succeed(ask(f, 2)); err == nil {
 		t.Fatal("a leader with no standby roster tried to lead")
+	}
+}
+
+// On cluster eu the leader's server was powered off: every pass spent the whole send timeout on it, so a pre-vote
+// that a quorum answered was already 2 s old when its probe was due, and no heir, nor Deplo's machine, ever led.
+func TestAnHeirLeadsWhileTheDeadLeadersServerTakesTheWholeSendTimeout(t *testing.T) {
+	f := lined(t)
+	g := heir(t, f)
+	dead := func(ctx context.Context, to wire.Party) (net.Conn, error) {
+		if to.Fingerprint == "fp-srv_a" {
+			f.clk.Add(2 * time.Second)
+			return nil, errors.New("i/o timeout")
+		}
+		return g.ms.dial(ctx, to)
+	}
+	g.l = leader.New(leader.Config{Dial: dead, Now: g.clk.Now, StateDir: t.TempDir(), Bundles: g.store, PathOK: func() bool { return true }, StartGrace: -1})
+	if err := g.l.Standby(withLine(snapshotRoster(f, 1), "srv_b")); err != nil {
+		t.Fatal(err)
+	}
+	f.ms.cut["fp-srv_a"] = true
+	f.clk.Add(lease.PreVoteFor + time.Second)
+	if err := g.l.Succeed(ask(f, 2)); err != nil {
+		t.Fatal(err)
+	}
+	g.step()
+	if !leadsNow(g) || f.ms.epoch["fp-srv_c"] != 2 {
+		t.Fatalf("the heir does not lead with a dead member in its roster: %+v, epochs %v", g.l.Snapshot().Clusters["clu_1"], f.ms.epoch)
+	}
+}
+
+// On cluster eu an heir that led was asked by its own server to lead again, at a newer epoch, and gave up the one
+// it led at: two heirs passed the cluster back and forth. A leader that leads takes no ask.
+func TestALeaderThatLeadsTakesNoAskToLeadAtANewerEpoch(t *testing.T) {
+	f := lined(t)
+	g := heir(t, f)
+	f.ms.cut["fp-srv_a"] = true
+	f.clk.Add(lease.PreVoteFor + time.Second)
+	_ = g.l.Succeed(ask(f, 2))
+	g.step()
+	if !leadsNow(g) {
+		t.Fatal("the heir does not lead")
+	}
+	if err := g.l.Succeed(ask(f, 5)); err != nil {
+		t.Fatal(err)
+	}
+	g.step()
+	if v := g.l.Snapshot().Clusters["clu_1"]; v.Epoch != 2 || !v.Leads {
+		t.Fatalf("a leader that leads took an ask for a newer epoch: %+v", v)
 	}
 }

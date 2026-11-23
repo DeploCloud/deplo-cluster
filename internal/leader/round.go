@@ -126,7 +126,8 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			continue
 		}
 		if p.prevote {
-			c.prevoted = now
+			// When the answers are in, not when the pass began: a dead member alone takes sendTimeout to give up on.
+			c.prevoted = l.cfg.Now()
 			continue
 		}
 		c.sure, c.heard = now, n
