@@ -61,6 +61,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		}
 		epochs[id] = c.epoch
 		line := c.line(now)
+		noExtension := !probe && !p.prevote && !p.announce && extend == 0 && c.noExtension(now)
 		for _, m := range c.members {
 			if p.prevote && !m.Succession {
 				continue
@@ -71,7 +72,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe, PreVote: p.prevote, From: c.roster.Self, Succeed: c.succeed}
 			if !probe && !p.prevote {
 				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told()), c.owesReturn(m.ID), int(extend/time.Second)
-				o.Line, o.Last, o.Heard = line, c.lineEnd(), c.heardAgo(now)
+				o.Line, o.Last, o.Heard, o.NoExtension = line, c.lineEnd(), c.heardAgo(now), noExtension
 			}
 			if p.announce {
 				o.Announce = int(lease.AnnounceFor / time.Second)
@@ -406,4 +407,18 @@ func (l *Leader) Run(ctx context.Context) {
 		case <-t.C:
 		}
 	}
+}
+
+// noExtension says no lease of the cluster can live on an extension: every member took a plain renewal from this
+// leader since its last extension, or has been silent past the longest lease another leader may have given it.
+func (c *cluster) noExtension(now time.Time) bool {
+	for id, m := range c.members {
+		if !m.other.IsZero() && now.Before(m.other.Add(lease.FenceAfter+lease.ExtendFor+fenceMargin)) {
+			return false
+		}
+		if e := c.extended[id]; !e.IsZero() && now.Before(e.Add(fenceMargin)) {
+			return false
+		}
+	}
+	return true
 }
