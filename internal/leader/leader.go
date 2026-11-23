@@ -145,8 +145,9 @@ type cluster struct {
 	succeed      bool
 	prevoted     time.Time
 	succeedUntil time.Time
-	// order is the heirs as the line last stood: see line.
+	// order is the heirs as the line last stood: see line. since is the event that began this epoch here.
 	order []string
+	since uint64
 }
 
 // GoneAfter is how long a member is silent before the others stop counting it. It is longer than a cut-off member
@@ -401,7 +402,12 @@ func (l *Leader) SetRoster(r Roster) error {
 	l.saveRosters()
 	l.mu.Unlock()
 	if changed {
-		l.log.Append("epoch", r.Cluster, map[string]uint64{"epoch": r.Epoch})
+		ev := l.log.Append("epoch", r.Cluster, map[string]uint64{"epoch": r.Epoch})
+		l.mu.Lock()
+		if c.epoch == r.Epoch {
+			c.since = ev.Seq
+		}
+		l.mu.Unlock()
 	}
 	return nil
 }
@@ -538,6 +544,8 @@ type ClusterView struct {
 	// Line is the members this leader names to lead after it, heir first; Succeed is an epoch it took without Deplo.
 	Line    []string `json:"line"`
 	Succeed bool     `json:"succeed,omitempty"`
+	// Since is the event that began this epoch on this leader: a control plane that adopts it replays from there.
+	Since uint64 `json:"since,omitempty"`
 }
 
 // Move is one replica the leader moved or left waiting (Member empty), and why.
@@ -558,7 +566,7 @@ func (l *Leader) Snapshot() Snapshot {
 	defer l.mu.Unlock()
 	s := Snapshot{Head: l.log.Head(), Clusters: map[string]ClusterView{}}
 	for id, c := range l.clusters {
-		v := ClusterView{Epoch: c.epoch, Superseded: c.superseded, Leads: c.leads(l.cfg.Now()), Members: []MemberView{}, Placement: append([]lease.Entry{}, c.placement...), Line: c.line(l.cfg.Now()), Succeed: c.succeed}
+		v := ClusterView{Epoch: c.epoch, Superseded: c.superseded, Leads: c.leads(l.cfg.Now()), Members: []MemberView{}, Placement: append([]lease.Entry{}, c.placement...), Line: c.line(l.cfg.Now()), Succeed: c.succeed, Since: c.since}
 		for _, m := range c.members {
 			v.Members = append(v.Members, MemberView{ID: m.ID, State: string(m.state)})
 		}

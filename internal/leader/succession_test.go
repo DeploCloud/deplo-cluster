@@ -97,9 +97,10 @@ func TestTheHeirLeadsOnceNoMemberHearsTheLeaderAnyMore(t *testing.T) {
 	if o := f.lastOrder("fp-srv_c"); o.From != "srv_b" || !slices.Equal(o.Line, []string{"srv_c"}) || o.Last != "srv_deplo" {
 		t.Fatalf("the heir's renewal: from %q, line %v, last %q", o.From, o.Line, o.Last)
 	}
-	ev, _ := g.l.Events().Since(0)
-	if !slices.ContainsFunc(ev, func(e evlog.Event) bool { return e.Type == "succeeded" }) {
-		t.Fatal("the control plane is not told the heir leads")
+	since := g.l.Snapshot().Clusters["clu_1"].Since
+	ev, _ := g.l.Events().Since(since - 1)
+	if len(ev) == 0 || ev[0].Type != "epoch" || !slices.ContainsFunc(ev, func(e evlog.Event) bool { return e.Type == "succeeded" }) {
+		t.Fatalf("a control plane that adopts the heir cannot replay this epoch from %d: %+v", since, ev)
 	}
 	f.ms.cut["fp-srv_a"] = false
 	f.pass(2 * time.Second)
