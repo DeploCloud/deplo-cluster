@@ -32,3 +32,26 @@ jobs:
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build -trimpath -o /dev/null .
           done
+
+  # Every kind of order this leader sends must pass deplo-agent's epoch and leader checks at the current epoch
+  # (cluster-rollout.md §7): agent canary.40 refused the start orders, which name no leader.
+  agent-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: cluster
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: DeploCloud/deplo-agent
+          path: agent
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go.mod
+          cache: false
+      - name: The agent takes every order this leader sends
+        working-directory: agent
+        run: go test ./internal/server -run 'TestOrders_theLeadersOrdersPass' -count=1 -v
+        env:
+          CGO_ENABLED: "0"
+          DEPLO_CLUSTER_REPO: ${{ github.workspace }}/cluster

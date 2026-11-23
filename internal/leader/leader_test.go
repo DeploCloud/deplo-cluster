@@ -122,6 +122,7 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 		}
 		var o lease.Order
 		_ = json.Unmarshal(line, &o)
+		recordSent(o)
 		m.mu.Lock()
 		wait := m.slow[to.Fingerprint]
 		m.mu.Unlock()
