@@ -123,8 +123,27 @@ func (l *Leader) Succeed(a SucceedAsk) error {
 	if err := l.SetRoster(r); err != nil {
 		return err
 	}
+	l.markSince(a.Cluster, r.Epoch)
 	l.cfg.Logf("deplo-cluster: cluster %s: its leader is silent and this server is next in line: trying to lead at epoch %d", a.Cluster, r.Epoch)
 	return nil
+}
+
+// markSince logs the epoch a try leads from when SetRoster did not, as on a second try at the epoch an earlier one
+// held: a control plane that adopts this leader replays its events from there, never from its newest one.
+func (l *Leader) markSince(id string, epoch uint64) {
+	l.mu.Lock()
+	c := l.clusters[id]
+	if c == nil || c.since != 0 || c.epoch != epoch {
+		l.mu.Unlock()
+		return
+	}
+	l.mu.Unlock()
+	ev := l.log.Append("epoch", id, map[string]uint64{"epoch": epoch})
+	l.mu.Lock()
+	if c := l.clusters[id]; c != nil && c.since == 0 && c.epoch == epoch {
+		c.since = ev.Seq
+	}
+	l.mu.Unlock()
 }
 
 // standDown drops a cluster this leader tried to take over and that no quorum took by its deadline: it stands by again.

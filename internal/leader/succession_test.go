@@ -244,3 +244,37 @@ func TestALeaderThatLeadsTakesNoAskToLeadAtANewerEpoch(t *testing.T) {
 		t.Fatalf("a leader that leads took an ask for a newer epoch: %+v", v)
 	}
 }
+
+// eu, 23 Nov 2026: an heir that stood down after a try at epoch 61 tried again at 61 and led; the snapshot gave no
+// epoch start, so Deplo adopted it from its newest event and replayed nothing of what it did.
+func TestASecondTryAtTheSameEpochIsReplayedFromWhereItBegan(t *testing.T) {
+	f := lined(t)
+	g := heir(t, f)
+	f.ms.cut["fp-srv_a"] = true
+	g.blind["srv_a"], g.blind["srv_c"] = true, true
+	f.clk.Add(lease.PreVoteFor + time.Second)
+	if err := g.l.Succeed(ask(f, 2)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		f.clk.Add(lease.RenewEvery)
+		g.step()
+	}
+	if _, tries := g.l.Snapshot().Clusters["clu_1"]; tries || leadsNow(g) {
+		t.Fatal("alone, the heir still tries, or leads")
+	}
+	head := g.l.Events().Head()
+	g.blind["srv_c"] = false
+	if err := g.l.Succeed(ask(f, 2)); err != nil {
+		t.Fatal(err)
+	}
+	g.step()
+	if !leadsNow(g) {
+		t.Fatalf("the second try does not lead: %+v", g.l.Snapshot().Clusters["clu_1"])
+	}
+	since := g.l.Snapshot().Clusters["clu_1"].Since
+	ev, _ := g.l.Events().Since(since - 1)
+	if since <= head || len(ev) == 0 || ev[0].Type != "epoch" || !slices.ContainsFunc(ev, func(e evlog.Event) bool { return e.Type == "succeeded" }) {
+		t.Fatalf("since %d (head before the try %d): a control plane cannot replay this epoch: %+v", since, head, ev)
+	}
+}
