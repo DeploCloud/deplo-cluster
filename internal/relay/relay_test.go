@@ -56,12 +56,17 @@ type member struct {
 
 // join starts a party that echoes "<from>:<line>" back on every stream it accepts.
 func (f *fixture) join(id *wire.Identity, role wire.Role) *member {
+	return f.joinVia(id, role, f.srv.URL)
+}
+
+// joinVia is join over these relay addresses.
+func (f *fixture) joinVia(id *wire.Identity, role wire.Role, relays ...string) *member {
 	f.t.Helper()
 	m := &member{id: id, got: make(chan string, 8), wire: wire.Party{Fingerprint: id.Fingerprint, Role: role}}
 	m.party = party.New(party.Config{
 		Role:     role,
 		Identity: func() (*wire.Identity, error) { return id, nil },
-		Relays:   func() []string { return []string{f.srv.URL} },
+		Relays:   func() []string { return relays },
 		Accept: func(from wire.Party, c net.Conn) {
 			defer c.Close()
 			buf := make([]byte, 64)
@@ -439,5 +444,32 @@ func TestOnePartyCannotHoldMoreStreamsThanTheCap(t *testing.T) {
 	if c, err := ma.party.Dial(f.ctx, mb.wire); err == nil {
 		c.Close()
 		t.Fatal("a third stream was carried past a cap of two")
+	}
+}
+
+// apps.idra.app on 23 Nov 2026: the panel's address and its backup both reach one relay. A party linked over both
+// kept closing its own other link, every few seconds; each address now holds its own.
+func TestTwoAddressesOfOneRelayHoldTwoLinksOfAParty(t *testing.T) {
+	f := newFixture(t, relay.Limit{})
+	alias := strings.Replace(f.srv.URL, "127.0.0.1", "localhost", 1)
+	a, b := f.ca.Leaf(t, "a"), f.ca.Leaf(t, "b")
+	ma := f.joinVia(a, wire.RoleMember, f.srv.URL, alias)
+	mb := f.join(b, wire.RoleMember)
+	f.relay.SetRoster("clu_1", []wire.Party{ma.wire, mb.wire})
+	f.waitConnected(ma, 2)
+	f.waitRelayHolds(2)
+	for i := 0; i < 20; i++ {
+		if got := ma.party.Connected(); got != 2 {
+			t.Fatalf("after %d ms the party holds %d links, want both", i*50, got)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	c, err := mb.party.DialRelay(f.ctx, ma.wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := exchange(t, c, "hi"); got != "echo:hi" {
+		t.Fatalf("got %q", got)
 	}
 }
