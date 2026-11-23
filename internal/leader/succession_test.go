@@ -223,3 +223,24 @@ func TestAnHeirLeadsWhileTheDeadLeadersServerTakesTheWholeSendTimeout(t *testing
 		t.Fatalf("the heir does not lead with a dead member in its roster: %+v, epochs %v", g.l.Snapshot().Clusters["clu_1"], f.ms.epoch)
 	}
 }
+
+// On cluster eu an heir that led was asked by its own server to lead again, at a newer epoch, and gave up the one
+// it led at: two heirs passed the cluster back and forth. A leader that leads takes no ask.
+func TestALeaderThatLeadsTakesNoAskToLeadAtANewerEpoch(t *testing.T) {
+	f := lined(t)
+	g := heir(t, f)
+	f.ms.cut["fp-srv_a"] = true
+	f.clk.Add(lease.PreVoteFor + time.Second)
+	_ = g.l.Succeed(ask(f, 2))
+	g.step()
+	if !leadsNow(g) {
+		t.Fatal("the heir does not lead")
+	}
+	if err := g.l.Succeed(ask(f, 5)); err != nil {
+		t.Fatal(err)
+	}
+	g.step()
+	if v := g.l.Snapshot().Clusters["clu_1"]; v.Epoch != 2 || !v.Leads {
+		t.Fatalf("a leader that leads took an ask for a newer epoch: %+v", v)
+	}
+}

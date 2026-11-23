@@ -97,7 +97,8 @@ type SucceedAsk struct {
 func (l *Leader) Succeed(a SucceedAsk) error {
 	now := l.cfg.Now()
 	l.mu.Lock()
-	if c := l.clusters[a.Cluster]; c != nil && !c.superseded && c.epoch >= a.Epoch {
+	// One that leads keeps its epoch: an ask means its own member went unheard, and a newer epoch would not mend that.
+	if c := l.clusters[a.Cluster]; c != nil && !c.superseded && (c.epoch >= a.Epoch || c.leads(now)) {
 		if c.succeed {
 			c.succeedUntil = now.Add(SucceedFor)
 		}
