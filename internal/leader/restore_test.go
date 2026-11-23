@@ -179,7 +179,7 @@ func TestNothingMovesWhileAMemberMayStillLiveOnAnExtendedLease(t *testing.T) {
 	f.putDB(t, "db_1", "db-main", backup(""))
 	state := t.TempDir()
 	mk := func() *leader.Leader {
-		return leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: state, Bundles: f.store, PathOK: func() bool { return true }})
+		return newLeader(t, leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: state, Bundles: f.store, PathOK: func() bool { return true }})
 	}
 	first := mk()
 	r := leader.Roster{Cluster: "clu_1", Epoch: 1, Members: []leader.Member{{ID: "srv_a", Fingerprint: "fp-srv_a", Arch: "amd64", FreeMB: 4096}, {ID: "srv_b", Fingerprint: "fp-srv_b", Arch: "amd64", FreeMB: 4096}},

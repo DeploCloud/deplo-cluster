@@ -21,7 +21,7 @@ func takeOver(t *testing.T, f *fo, cutOff ...string) *fo {
 // takeOverWith is takeOver from the picture Deplo has, which may have missed the old leader's last events.
 func takeOverWith(t *testing.T, f *fo, picture leader.Roster, cutOff ...string) *fo {
 	t.Helper()
-	g := &fo{clk: f.clk, ms: f.ms, pathOK: true, dir: t.TempDir(), blind: map[string]bool{}}
+	g := &fo{t: t, clk: f.clk, ms: f.ms, pathOK: true, dir: t.TempDir(), blind: map[string]bool{}}
 	var err error
 	if g.store, err = bundles.Open(t.TempDir()); err != nil {
 		t.Fatal(err)
@@ -30,7 +30,7 @@ func takeOverWith(t *testing.T, f *fo, picture leader.Roster, cutOff ...string) 
 		g.blind[id] = true
 	}
 	// Deplo's machine runs its leader all along: a takeover is a new epoch, not a start, so no start grace.
-	g.l = leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store, PathOK: func() bool { return g.pathOK }, StartGrace: -1, Logf: g.logf})
+	g.l = newLeader(t, leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store, PathOK: func() bool { return g.pathOK }, StartGrace: -1, Logf: g.logf})
 	if err := g.l.SetRoster(picture); err != nil {
 		t.Fatal(err)
 	}

@@ -71,7 +71,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe, PreVote: p.prevote, From: c.roster.Self, Succeed: c.succeed}
 			if !probe && !p.prevote {
 				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told()), c.owesReturn(m.ID), int(extend/time.Second)
-				o.Line, o.Last = line, c.lineEnd()
+				o.Line, o.Last, o.Heard = line, c.lineEnd(), c.heardAgo(now)
 			}
 			if p.announce {
 				o.Announce = int(lease.AnnounceFor / time.Second)
@@ -89,6 +89,9 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		l.saveFailover()
 	}
 	l.mu.Unlock()
+	if extend > 0 {
+		l.Flush()
+	}
 
 	answered := make(chan string, len(jobs))
 	var wg sync.WaitGroup
@@ -135,7 +138,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			continue
 		}
 		if c.succeed {
-			c.succeed, c.roster.Succeed = false, false
+			c.succeed, c.roster.Succeed, c.ledAt = false, false, now
 			l.saveRosters()
 			tells = append(tells, l.succeeded(id, c.epoch))
 		}
@@ -263,7 +266,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 			m.running = r.Running
 			l.mu.Unlock()
 			if o.Probe && !r.Reports {
-				l.cfg.Logf("deplo-cluster: %s's server agent does not say what it runs: the roster stands for its writers", id)
+				l.once("reports "+id, "deplo-cluster: %s's server agent does not say what it runs: the roster stands for its writers", id)
 			}
 		}
 		return r.OK
@@ -345,6 +348,17 @@ func (l *Leader) settle() {
 	}
 }
 
+// heardAgo is how long ago each member was last heard, in milliseconds, for the next leader; the caller holds l.mu.
+func (c *cluster) heardAgo(now time.Time) map[string]int64 {
+	out := map[string]int64{}
+	for id, m := range c.members {
+		if at := m.lastHeard(); !at.IsZero() {
+			out[id] = max(now.Sub(at).Milliseconds(), 0)
+		}
+	}
+	return out
+}
+
 // regroup takes a member silent past GoneAfter out of the majority while this leader leads the others, and counts
 // it again once it has answered for GiveCopyAfter and said what it removed. It names what changed, or "".
 func (c *cluster) regroup(mid string, now time.Time) string {
@@ -356,7 +370,8 @@ func (c *cluster) regroup(mid string, now time.Time) string {
 		}
 		return ""
 	}
-	if !m.heard || now.Sub(m.lastAck) < GoneAfter || !c.leads(now) || c.voters() < 2 {
+	// Counted from the last time any leader heard it, so a takeover never starts the clock over.
+	if last := m.lastHeard(); last.IsZero() || now.Sub(last) < GoneAfter || !c.leads(now) || c.voters() < 2 {
 		return ""
 	}
 	if c.gone == nil {

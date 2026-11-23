@@ -23,7 +23,7 @@ import (
 func TestRotation_theRosterCarriesItsMembersKeyRotationsAcrossARestart(t *testing.T) {
 	old, next := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	dir := t.TempDir()
-	l := leader.New(leader.Config{StateDir: dir})
+	l := newLeader(t, leader.Config{StateDir: dir})
 	roster := leader.Roster{Cluster: "clu_1", Epoch: 1, Members: []leader.Member{{ID: "srv_1", Fingerprint: old}},
 		Rotations: []wire.Rotation{{From: old, To: next}}}
 	srv := httptest.NewServer(l.Handler())
@@ -45,7 +45,8 @@ func TestRotation_theRosterCarriesItsMembersKeyRotationsAcrossARestart(t *testin
 	if got := l.Rotations(); !slices.Equal(got, want) {
 		t.Fatalf("rotations: %+v", got)
 	}
-	if got := leader.New(leader.Config{StateDir: dir}).Rotations(); !slices.Equal(got, want) {
+	l.Flush()
+	if got := newLeader(t, leader.Config{StateDir: dir}).Rotations(); !slices.Equal(got, want) {
 		t.Fatalf("after a restart: %+v", got)
 	}
 	if err := l.SetRoster(leader.Roster{Cluster: "clu_1", Epoch: 1, Rotations: []wire.Rotation{{From: old, To: "nope"}}}); err == nil {
@@ -63,7 +64,7 @@ func TestRotation_theRosterCarriesItsMembersKeyRotationsAcrossARestart(t *testin
 func TestRotation_aMemberThatRotatedKeepsItsLease(t *testing.T) {
 	old, next, other := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
 	clk := &clock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
-	l := leader.New(leader.Config{Now: clk.Now, Dial: func(context.Context, wire.Party) (net.Conn, error) {
+	l := newLeader(t, leader.Config{Now: clk.Now, Dial: func(context.Context, wire.Party) (net.Conn, error) {
 		return nil, errors.New("not answering")
 	}})
 	roster := func(fp string, rs ...wire.Rotation) {

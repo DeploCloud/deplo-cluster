@@ -139,7 +139,8 @@ func TestARestartedLeaderStillAsksAMemberThatWasComingBack(t *testing.T) {
 	f := gone(t)
 	f.ms.cut["fp-srv_a"] = false
 	f.pass(5 * time.Second)
-	f.l = leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return true }})
+	f.l.Flush()
+	f.l = newLeader(t, leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return true }})
 	f.ms.returned["fp-srv_a"] = &lease.Returned{Removed: []string{"web"}}
 	f.pass(5 * time.Second)
 	if got := f.events("member_returned"); len(got) != 1 {

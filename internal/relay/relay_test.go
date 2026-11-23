@@ -2,10 +2,12 @@ package relay_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -471,5 +473,34 @@ func TestTwoAddressesOfOneRelayHoldTwoLinksOfAParty(t *testing.T) {
 	defer c.Close()
 	if got := exchange(t, c, "hi"); got != "echo:hi" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// eu, 23 Nov 2026: an heir's leader the relay did not name was let in and cut off again every few seconds, and wrote
+// "is up" and "connection ended" each time. The same quick end, again and again, is one state, said once.
+func TestARelayThatRefusesAPartyAgainAndAgainIsSaidOnce(t *testing.T) {
+	f := newFixture(t, relay.Limit{})
+	id := f.ca.Leaf(t, "nobody")
+	var mu sync.Mutex
+	var logged []string
+	p := party.New(party.Config{
+		Role:     wire.RoleLeader,
+		Identity: func() (*wire.Identity, error) { return id, nil },
+		Relays:   func() []string { return []string{f.srv.URL} },
+		Accept:   func(wire.Party, net.Conn) {},
+		Logf: func(format string, a ...any) {
+			mu.Lock()
+			logged = append(logged, fmt.Sprintf(format, a...))
+			mu.Unlock()
+		},
+	})
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	go p.Run(ctx)
+	time.Sleep(3500 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) > 2 {
+		t.Fatalf("a party the relay keeps refusing wrote %d lines: %q", len(logged), logged)
 	}
 }

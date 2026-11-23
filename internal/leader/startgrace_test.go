@@ -18,7 +18,7 @@ import (
 // coldStart is startFO on three members, but the ones in cut have not answered this leader since it started.
 func coldStart(t *testing.T, grace time.Duration, cut ...string) *fo {
 	t.Helper()
-	f := &fo{pathOK: true, blind: map[string]bool{}}
+	f := &fo{t: t, pathOK: true, blind: map[string]bool{}}
 	f.clk = &clock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
 	f.ms = newMembers()
 	f.ms.now = f.clk.Now
@@ -27,7 +27,7 @@ func coldStart(t *testing.T, grace time.Duration, cut ...string) *fo {
 		t.Fatal(err)
 	}
 	f.dir = t.TempDir()
-	f.l = leader.New(leader.Config{Dial: f.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }, StartGrace: grace})
+	f.l = newLeader(t, leader.Config{Dial: f.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }, StartGrace: grace})
 	r := leader.Roster{Cluster: "clu_1", Epoch: 1}
 	for _, id := range []string{"srv_a", "srv_b", "srv_c"} {
 		r.Members = append(r.Members, leader.Member{ID: id, Fingerprint: "fp-" + id, Arch: "amd64", FreeMB: 4096})

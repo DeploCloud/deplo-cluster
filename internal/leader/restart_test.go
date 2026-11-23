@@ -11,7 +11,8 @@ import (
 
 // restart is the leader's process ending and a new one starting on the same state directory.
 func (f *fo) restart() {
-	f.l = leader.New(leader.Config{Dial: f.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }})
+	f.l.Flush()
+	f.l = newLeader(f.t, leader.Config{Dial: f.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }})
 }
 
 func snapshotRoster(f *fo, epoch uint64) leader.Roster {

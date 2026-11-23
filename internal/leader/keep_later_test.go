@@ -160,7 +160,8 @@ func TestDataThatIsGoneUnsavedEndsTheAskingAndSaysNothing(t *testing.T) {
 func TestARestartedLeaderStillAsksAboutWhatAMemberKept(t *testing.T) {
 	f := keptBack(t)
 	asked := f.lastOrder("fp-srv_a").Keep
-	f.l = leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return true }})
+	f.l.Flush()
+	f.l = newLeader(t, leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return true }})
 	if err := f.l.SetRoster(leader.Roster{Cluster: "clu_1", Epoch: 1, Members: []leader.Member{
 		{ID: "srv_a", Fingerprint: "fp-srv_a", Arch: "amd64", FreeMB: 4096}, {ID: "srv_b", Fingerprint: "fp-srv_b", Arch: "amd64", FreeMB: 4096}},
 		Placement: []lease.Entry{{Kind: "database", ID: "db_1", Member: "srv_b", Slug: "db-main", SingleWriter: true}, {Kind: "app", ID: "prj_1", Member: "srv_b", Slug: "web"}}}); err != nil {
