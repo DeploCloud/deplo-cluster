@@ -203,3 +203,27 @@ func TestAWorkloadThatWentBackToItsMemberIsNotSaved(t *testing.T) {
 		t.Fatalf("keep %+v for a workload placed on the member itself", k)
 	}
 }
+
+func TestTheCopiesAReturningMemberSetAsideAreToldWithItsWorkload(t *testing.T) {
+	f := movedWithKeep(t)
+	f.clk.Add(time.Hour)
+	f.ms.cut["fp-srv_a"] = false
+	f.ms.returned["fp-srv_a"] = &lease.Returned{Removed: []string{"db-main", "web"},
+		Aside: []lease.Aside{{Slug: "db-main", Volume: "deplo-db-main_db-main-data-aside-20260301T130135Z", Of: "deplo-db-main_db-main-data", At: "2026-03-01T13:01:35Z", SizeBytes: 4096},
+			{Slug: "gone-long-ago", Volume: "x-aside-20260301T130135Z", Of: "x"}}}
+	f.pass(5 * time.Second)
+	got := f.events("member_returned")
+	if len(got) != 1 {
+		t.Fatalf("return events %v", got)
+	}
+	var ev struct {
+		Aside []map[string]any `json:"aside"`
+	}
+	if err := json.Unmarshal([]byte(got[0]), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if len(ev.Aside) != 1 || ev.Aside[0]["kind"] != "database" || ev.Aside[0]["workloadId"] != "db_1" ||
+		ev.Aside[0]["volume"] != "deplo-db-main_db-main-data-aside-20260301T130135Z" || ev.Aside[0]["sizeBytes"] != float64(4096) {
+		t.Fatalf("aside %v", ev.Aside)
+	}
+}

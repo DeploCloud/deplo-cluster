@@ -54,6 +54,9 @@ func (l *Leader) cameBack(clusterID, memberID string, report *lease.Returned) fu
 				data["kept"] = kept
 			}
 		}
+		if aside := c.asideOf(report.Aside); len(aside) > 0 {
+			data["aside"] = aside
+		}
 		delete(c.left, memberID)
 		delete(c.dropped, memberID)
 	}
@@ -130,4 +133,24 @@ func containsStopped(all []Stopped, kind, id string) bool {
 		}
 	}
 	return false
+}
+
+// Aside is one dated copy a returning member kept of a workload's volume, as the control plane reads it.
+type Aside struct {
+	Kind      string `json:"kind"`
+	ID        string `json:"workloadId"`
+	Volume    string `json:"volume"`
+	At        string `json:"at"`
+	SizeBytes int64  `json:"sizeBytes"`
+}
+
+// asideOf names each copy's workload; one of a stack this cluster no longer has is left out. The caller holds l.mu.
+func (c *cluster) asideOf(in []lease.Aside) []Aside {
+	var out []Aside
+	for _, a := range in {
+		if e, ok := c.entryBySlug(a.Slug); ok {
+			out = append(out, Aside{Kind: e.Kind, ID: e.ID, Volume: a.Volume, At: a.At, SizeBytes: a.SizeBytes})
+		}
+	}
+	return out
 }
