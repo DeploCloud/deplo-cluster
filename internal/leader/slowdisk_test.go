@@ -14,6 +14,8 @@ import (
 // (a pipe nobody reads stands in for the disk) now holds no renewal up.
 func TestAStateFileThatHangsHoldsNoRenewalUp(t *testing.T) {
 	f := startFO(t, abc())
+	// The first roster's write is over before the pipe takes the place of its temporary file.
+	f.l.Flush()
 	hung := filepath.Join(f.dir, "rosters.json.tmp")
 	if err := syscall.Mkfifo(hung, 0o600); err != nil {
 		t.Fatal(err)
