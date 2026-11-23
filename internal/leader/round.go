@@ -126,6 +126,9 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 	l.mu.Lock()
 	for id, n := range heard {
 		c := l.clusters[id]
+		if c != nil && c.succeed && p.prevote {
+			l.once("tally "+id, "deplo-cluster: cluster %s: epoch %d: %d of %d members would take it, Deplo's word %t", id, c.epoch, n, c.voters(), now.Sub(c.deplo) < DeploFor)
+		}
 		if c == nil || c.superseded || c.epoch != epochs[id] || !c.quorum(n, now) {
 			continue
 		}
