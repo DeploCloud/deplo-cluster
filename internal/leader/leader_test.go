@@ -122,6 +122,7 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 		}
 		var o lease.Order
 		_ = json.Unmarshal(line, &o)
+		recordSent(o)
 		m.mu.Lock()
 		wait := m.slow[to.Fingerprint]
 		m.mu.Unlock()
@@ -183,6 +184,9 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 			}
 			if o.Announce > 0 {
 				m.announced[fp] = laterOf(m.announced[fp], now.Add(time.Duration(o.Announce)*time.Second))
+			}
+			if o.NoExtension && !o.Probe {
+				m.announced[fp], m.unannounced[fp] = time.Time{}, time.Time{}
 			}
 			u := max(int(laterOf(m.announced[fp], m.unannounced[fp]).Sub(now).Seconds()+0.999), 0)
 			r.Unsure = &u
