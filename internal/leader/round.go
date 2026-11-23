@@ -308,7 +308,8 @@ func (l *Leader) settle() {
 	sort.Strings(ids)
 	for _, id := range ids {
 		c := l.clusters[id]
-		if c.superseded {
+		// One still trying to lead renews nobody: what it would say of a member, itself included, is not so (eu, 23 Nov).
+		if c.superseded || c.succeed && c.sure.IsZero() {
 			continue
 		}
 		mids := make([]string, 0, len(c.members))

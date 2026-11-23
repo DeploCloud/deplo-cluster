@@ -360,3 +360,30 @@ func TestALeaderThatTookOverSaysNothingOfAMemberItHasNotHeard(t *testing.T) {
 		}
 	}
 }
+
+// eu, 23 Nov 2026: the heir trying to lead (no quorum yet) wrote that every member, its own included, was not
+// responding, and Deplo said it once it adopted that heir. One still trying says nothing of its members.
+func TestAnHeirStillTryingToLeadSaysNothingOfItsMembers(t *testing.T) {
+	f := lined(t)
+	g := heir(t, f)
+	f.ms.cut["fp-srv_a"] = true
+	g.blind["srv_a"] = true
+	f.clk.Add(4 * time.Second)
+	// 4 s to 9 s after the leader's last renewal: under the removal time, so nobody takes the heir's epoch.
+	for i := 0; i < 6; i++ {
+		if err := g.l.Succeed(ask(f, 2)); err != nil {
+			t.Fatal(err)
+		}
+		g.step()
+		if leadsNow(g) {
+			break
+		}
+		f.clk.Add(time.Second)
+	}
+	if leadsNow(g) {
+		t.Fatal("the heir led while the members still heard the leader")
+	}
+	if ev := g.events("member_state"); len(ev) != 0 {
+		t.Fatalf("an heir still trying said %v", ev)
+	}
+}
