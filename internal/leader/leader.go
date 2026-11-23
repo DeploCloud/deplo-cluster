@@ -73,6 +73,8 @@ type Member struct {
 	NoRestore bool `json:"noRestore,omitempty"`
 	// ShortFence is a member whose agent keeps to the fence its leader gives it, as Deplo knows from its version.
 	ShortFence bool `json:"shortFence,omitempty"`
+	// Succession is a member whose agent answers a pre-vote and gives each epoch to one leader only.
+	Succession bool `json:"succession,omitempty"`
 }
 
 type member struct {
@@ -95,6 +97,8 @@ type member struct {
 	running []lease.Writer
 	// upSince is when it last began answering after a silence: copyBack waits for GiveCopyAfter of it.
 	upSince time.Time
+	// answered is its last answer of any kind, a probe's included: the line names a member that answers.
+	answered time.Time
 }
 
 type cluster struct {
@@ -136,6 +140,13 @@ type cluster struct {
 	starting map[string]bool
 	// gone is the members silent past GoneAfter that no longer count for a majority, and since when (ADR-0049).
 	gone map[string]time.Time
+	// succeed is an epoch this leader took without Deplo's word: it pre-votes before it probes (prevoted), until a
+	// quorum takes it, and stands by again when none did by succeedUntil.
+	succeed      bool
+	prevoted     time.Time
+	succeedUntil time.Time
+	// order is the heirs as the line last stood: see line.
+	order []string
 }
 
 // GoneAfter is how long a member is silent before the others stop counting it. It is longer than a cut-off member
@@ -218,6 +229,8 @@ type Leader struct {
 	pending []pendingMove
 	// started is when this leader started: see unknown.
 	started time.Time
+	// standby is the rosters Deplo gave this leader to take a cluster over from, when its member is next in line.
+	standby map[string]Roster
 	// rotations are every roster's key rotations, read by the party without the lock.
 	rotations atomic.Pointer[[]wire.Rotation]
 }
@@ -235,7 +248,7 @@ func New(cfg Config) *Leader {
 		_ = os.MkdirAll(cfg.StateDir, 0o700)
 		file = filepath.Join(cfg.StateDir, "events.jsonl")
 	}
-	l := &Leader{cfg: cfg, log: events.Open(file, MaxEvents, cfg.Now), clusters: map[string]*cluster{}, epochs: map[string]uint64{}, started: cfg.Now()}
+	l := &Leader{cfg: cfg, log: events.Open(file, MaxEvents, cfg.Now), clusters: map[string]*cluster{}, epochs: map[string]uint64{}, started: cfg.Now(), standby: map[string]Roster{}}
 	if cfg.StateDir != "" {
 		raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "epochs.json"))
 		if err == nil {
@@ -249,6 +262,7 @@ func New(cfg Config) *Leader {
 			return l
 		}
 		l.loadRosters()
+		l.loadStandby()
 	}
 	return l
 }
@@ -282,6 +296,14 @@ type Roster struct {
 	Standbys []lease.Entry `json:"standbys,omitempty"`
 	// Rotations are its members' key rotations (ADR-0050): a member named by an old certificate answers with its new.
 	Rotations []wire.Rotation `json:"rotations,omitempty"`
+	// Self is the server this leader runs on, which every order names; Deplo is Deplo's machine, the end of every line.
+	Self  string `json:"self,omitempty"`
+	Deplo string `json:"deplo,omitempty"`
+	// Heirs are the members that may lead after this one, in Deplo's order: each runs a leader that holds the bundles.
+	Heirs []string `json:"heirs,omitempty"`
+	// Succeed is an epoch taken without Deplo's word, by a member next in line or by Deplo's machine standing in: it
+	// leads only once a quorum would take it from no leader it still hears (a pre-vote).
+	Succeed bool `json:"succeed,omitempty"`
 }
 
 // Rotations is every key rotation the rosters announced, for the party that dials members.
@@ -366,6 +388,9 @@ func (l *Leader) SetRoster(r Roster) error {
 	if r.Epoch > c.epoch {
 		c.superseded = false
 	}
+	if c.succeed = r.Succeed; c.succeed {
+		c.succeedUntil = now.Add(SucceedFor)
+	}
 	c.epoch = r.Epoch
 	l.epochs[r.Cluster] = r.Epoch
 	if changed {
@@ -397,6 +422,10 @@ func (l *Leader) Forget(clusterID string) error {
 	delete(l.clusters, clusterID)
 	delete(l.epochs, clusterID)
 	delete(l.restored, clusterID)
+	if _, ok := l.standby[clusterID]; ok {
+		delete(l.standby, clusterID)
+		l.keep("standby.json", l.standby)
+	}
 	l.keepRotations()
 	l.saveEpochs()
 	l.saveRosters()
@@ -505,15 +534,17 @@ func (l *Leader) Tick(ctx context.Context) {
 // round asks the members of every cluster this leader is not sure it leads, then sends its orders where a
 // quorum answered. The caller holds l.tickMu.
 func (l *Leader) round(ctx context.Context) {
+	l.standDown(l.cfg.Now())
+	l.exchange(ctx, pass{prevote: true})
 	l.exchange(ctx, pass{probe: true})
 	l.exchange(ctx, pass{})
 }
 
 // pass is one exchange: a probe, a renewal that may announce an extension, or one that extends, to only some clusters.
 type pass struct {
-	probe, announce bool
-	extend          time.Duration
-	only            map[string]bool
+	probe, announce, prevote bool
+	extend                   time.Duration
+	only                     map[string]bool
 }
 
 // exchange sends one order to every member of the clusters that are due it: a probe where this leader is not
@@ -533,17 +564,22 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 	now := l.cfg.Now()
 	l.mu.Lock()
 	for id, c := range l.clusters {
-		if c.superseded || c.leads(now) == probe || p.only != nil && !p.only[id] {
+		if c.superseded || c.leads(now) == (probe || p.prevote) || p.only != nil && !p.only[id] || !c.due(p, now) {
 			continue
 		}
 		epochs[id] = c.epoch
+		line := c.line(now)
 		for _, m := range c.members {
+			if p.prevote && !m.Succession {
+				continue
+			}
 			if probe {
 				m.running = nil
 			}
-			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe}
-			if !probe {
+			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe, PreVote: p.prevote, From: c.roster.Self, Succeed: c.succeed}
+			if !probe && !p.prevote {
 				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told()), c.owesReturn(m.ID), int(extend/time.Second)
+				o.Line, o.Last = line, c.lineEnd()
 			}
 			if p.announce {
 				o.Announce = int(lease.AnnounceFor / time.Second)
@@ -597,9 +633,18 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		if c == nil || c.superseded || c.epoch != epochs[id] || !c.quorum(n, now) {
 			continue
 		}
+		if p.prevote {
+			c.prevoted = now
+			continue
+		}
 		c.sure, c.heard = now, n
 		if !probe {
 			continue
+		}
+		if c.succeed {
+			c.succeed, c.roster.Succeed = false, false
+			l.saveRosters()
+			tells = append(tells, l.succeeded(id, c.epoch))
 		}
 		// It was not sure until now, so an older leader may have extended a lease meanwhile: a member this one
 		// never heard holds the longest one again, counted as from a roster one renewal before this round.
@@ -710,7 +755,15 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 		}
 		return false
 	}
-	// A probe renewed nothing: the member's lease is as old as it was.
+	if r.OK {
+		l.mu.Lock()
+		m.answered = l.cfg.Now()
+		l.mu.Unlock()
+	}
+	// A probe renewed nothing, a pre-vote took nothing: the member's lease is as old as it was.
+	if o.PreVote {
+		return r.OK
+	}
 	if !r.OK || o.Probe {
 		if r.OK {
 			l.mu.Lock()
@@ -862,6 +915,9 @@ type ClusterView struct {
 	Placement []lease.Entry `json:"placement"`
 	// Moves are the placements the leader made on its own that no roster has repeated yet.
 	Moves []Move `json:"moves"`
+	// Line is the members this leader names to lead after it, heir first; Succeed is an epoch it took without Deplo.
+	Line    []string `json:"line"`
+	Succeed bool     `json:"succeed,omitempty"`
 }
 
 // Move is one replica the leader moved or left waiting (Member empty), and why.
@@ -882,7 +938,7 @@ func (l *Leader) Snapshot() Snapshot {
 	defer l.mu.Unlock()
 	s := Snapshot{Head: l.log.Head(), Clusters: map[string]ClusterView{}}
 	for id, c := range l.clusters {
-		v := ClusterView{Epoch: c.epoch, Superseded: c.superseded, Leads: c.leads(l.cfg.Now()), Members: []MemberView{}, Placement: append([]lease.Entry{}, c.placement...)}
+		v := ClusterView{Epoch: c.epoch, Superseded: c.superseded, Leads: c.leads(l.cfg.Now()), Members: []MemberView{}, Placement: append([]lease.Entry{}, c.placement...), Line: c.line(l.cfg.Now()), Succeed: c.succeed}
 		for _, m := range c.members {
 			v.Members = append(v.Members, MemberView{ID: m.ID, State: string(m.state)})
 		}

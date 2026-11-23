@@ -32,6 +32,28 @@ func (l *Leader) Handler() http.Handler {
 		// The count says this leader keeps rotations: Deplo rotates no member's key past a leader that would not.
 		reply(w, map[string]any{"ok": true, "rotations": len(req.Rotations)})
 	})
+	mux.HandleFunc("POST /call/leader.standby", func(w http.ResponseWriter, r *http.Request) {
+		var req Roster
+		if !decode(w, r, &req) {
+			return
+		}
+		if err := l.Standby(req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		reply(w, map[string]bool{"ok": true})
+	})
+	mux.HandleFunc("POST /call/leader.succeed", func(w http.ResponseWriter, r *http.Request) {
+		var req SucceedAsk
+		if !decode(w, r, &req) {
+			return
+		}
+		if err := l.Succeed(req); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		reply(w, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("POST /call/leader.beat", func(w http.ResponseWriter, r *http.Request) {
 		var req Beat
 		if decode(w, r, &req) {
