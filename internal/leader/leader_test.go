@@ -75,6 +75,9 @@ type members struct {
 	witness, shortFence    map[string]bool
 	announced, unannounced map[string]time.Time
 	fence                  map[string]int
+	// from is the leader each member gave its epoch to; prevotes counts the pre-votes it answered yes.
+	from     map[string]string
+	prevotes map[string]int
 }
 
 // leaseEnd is when the lease a member holds runs out, as its agent counts it.
@@ -97,7 +100,7 @@ func laterOf(a, b time.Time) time.Time {
 
 func newMembers() *members {
 	return &members{epoch: map[string]uint64{}, running: map[string][]lease.Writer{}, old: map[string]bool{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, stoppedWithin: map[string]int{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{},
-		witness: map[string]bool{}, shortFence: map[string]bool{}, announced: map[string]time.Time{}, unannounced: map[string]time.Time{}, fence: map[string]int{}}
+		witness: map[string]bool{}, shortFence: map[string]bool{}, announced: map[string]time.Time{}, unannounced: map[string]time.Time{}, fence: map[string]int{}, from: map[string]string{}, prevotes: map[string]int{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -128,16 +131,21 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 		m.mu.Lock()
 		held := m.epoch[to.Fingerprint]
 		r := lease.Reply{OK: true}
-		if o.Epoch < held {
+		hears := m.now != nil && !m.renewed[to.Fingerprint].IsZero() && m.now().Sub(m.renewed[to.Fingerprint]) < lease.PreVoteFor
+		if o.Epoch < held || o.Epoch == held && o.From != "" && m.from[to.Fingerprint] != "" && o.From != m.from[to.Fingerprint] {
 			r = lease.Reply{Error: lease.StaleEpoch, Epoch: held}
+		} else if o.Succeed && o.Epoch > held && hears {
+			r = lease.Reply{Error: lease.LeaderAlive, Epoch: held}
+		} else if o.PreVote {
+			m.prevotes[to.Fingerprint]++
 		} else if o.Probe {
-			m.epoch[to.Fingerprint] = o.Epoch
+			m.epoch[to.Fingerprint], m.from[to.Fingerprint] = o.Epoch, o.From
 			m.probes[to.Fingerprint] = append(m.probes[to.Fingerprint], o)
 			if !m.old[to.Fingerprint] {
 				r.Running, r.Reports = m.running[to.Fingerprint], true
 			}
 		} else {
-			m.epoch[to.Fingerprint] = o.Epoch
+			m.epoch[to.Fingerprint], m.from[to.Fingerprint] = o.Epoch, o.From
 			m.orders[to.Fingerprint] = append(m.orders[to.Fingerprint], o)
 			r.StoppedWithin = m.stoppedWithin[to.Fingerprint]
 			if m.now != nil {
