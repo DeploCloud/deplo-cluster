@@ -162,6 +162,7 @@ func TestAKeepOnAMembersDiskNamesThatMemberAndABundleWithoutOneSendsNothing(t *t
 
 func TestARestartedLeaderStillKnowsWhatAMemberLeftAndWhen(t *testing.T) {
 	f := movedWithKeep(t)
+	f.l.Flush()
 	raw, err := os.ReadFile(filepath.Join(f.dir, "failover.json"))
 	if err != nil || strings.Contains(string(raw), "s3cr3t") || strings.Contains(string(raw), "secretKey") {
 		t.Fatalf("the leader's state holds the destination's credentials: %s (%v)", raw, err)
@@ -172,7 +173,8 @@ func TestARestartedLeaderStillKnowsWhatAMemberLeftAndWhen(t *testing.T) {
 		Placement: []lease.Entry{{Kind: "database", ID: "db_1", Member: "srv_a", Slug: "db-main", SingleWriter: true}, {Kind: "app", ID: "prj_1", Member: "srv_a", Slug: "web"}}}); err != nil {
 		t.Fatal(err)
 	}
-	f.l = leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return true }})
+	f.l.Flush()
+	f.l = newLeader(t, leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return true }})
 	f.clk.Add(time.Hour)
 	f.ms.cut["fp-srv_a"] = false
 	f.pass(5 * time.Second)

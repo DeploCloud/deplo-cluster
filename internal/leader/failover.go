@@ -401,18 +401,20 @@ func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error 
 // ordered, used in place of the kept one. waited is a retry of what found no room. Whether the workload may
 // still run where it was is asked again right before each start, and whether this leader still leads after it.
 func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, replica int, from string, waited bool, asked *bundles.Bundle) outcome {
+	subject := "bundle " + clusterID + " " + kind + " " + id
 	meta, err := l.cfg.Bundles.Meta(clusterID, kind, id)
 	if err != nil {
-		l.cfg.Logf("deplo-cluster: %s %s has no bundle, so it does not fail over", kind, id)
+		l.once(subject, "deplo-cluster: %s %s has no bundle, so it does not fail over", kind, id)
 		return outcome{skipped: true, why: NotPlaced}
 	}
 	var b bundles.Bundle
 	if asked != nil {
 		b = *asked
 	} else if b, err = l.cfg.Bundles.Unseal(clusterID, kind, id); err != nil {
-		l.cfg.Logf("deplo-cluster: %s %s: %v", kind, id, err)
+		l.once(subject, "deplo-cluster: %s %s: %v", kind, id, err)
 		return outcome{skipped: true}
 	}
+	l.unsay(subject)
 	exclude := map[string]bool{}
 	if asked != nil {
 		// A promotion is a start too: the member a person's move leaves is checked before it, never two writers.

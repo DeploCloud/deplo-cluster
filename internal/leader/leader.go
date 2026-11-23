@@ -99,6 +99,16 @@ type member struct {
 	upSince time.Time
 	// answered is its last answer of any kind, a probe's included: the line names a member that answers.
 	answered time.Time
+	// inherited is when the leader before this one last heard it, as the heir that took over was told.
+	inherited time.Time
+}
+
+// lastHeard is when any leader of this cluster last heard the member, as far as this one knows; zero is never.
+func (m *member) lastHeard() time.Time {
+	if m.heard {
+		return latest(m.lastAck, m.inherited)
+	}
+	return m.inherited
 }
 
 type cluster struct {
@@ -148,6 +158,8 @@ type cluster struct {
 	// order is the heirs as the line last stood: see line. since is the event that began this epoch here.
 	order []string
 	since uint64
+	// ledAt is when a quorum took the epoch this leader took on its own: what Deplo dates the takeover with.
+	ledAt time.Time
 }
 
 // GoneAfter is how long a member is silent before the others stop counting it. It is longer than a cut-off member
@@ -234,6 +246,33 @@ type Leader struct {
 	standby map[string]Roster
 	// rotations are every roster's key rotations, read by the party without the lock.
 	rotations atomic.Pointer[[]wire.Rotation]
+	// files writes the state directory off l.mu: nil keeps nothing.
+	files *statefile.Writer
+	// said is the last line logged on each subject that a pass every second would repeat: see once.
+	saidMu sync.Mutex
+	said   map[string]string
+}
+
+// once logs a line a pass every second would repeat only when it differs from the last one on that subject.
+func (l *Leader) once(subject, format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
+	l.saidMu.Lock()
+	if l.said == nil {
+		l.said = map[string]string{}
+	}
+	again := l.said[subject] == line
+	l.said[subject] = line
+	l.saidMu.Unlock()
+	if !again {
+		l.cfg.Logf("%s", line)
+	}
+}
+
+// unsay forgets a subject's line: what it said is over, and the next one is news.
+func (l *Leader) unsay(subject string) {
+	l.saidMu.Lock()
+	delete(l.said, subject)
+	l.saidMu.Unlock()
 }
 
 // New returns a leader; Run starts renewing.
@@ -251,6 +290,7 @@ func New(cfg Config) *Leader {
 	}
 	l := &Leader{cfg: cfg, log: events.Open(file, MaxEvents, cfg.Now), clusters: map[string]*cluster{}, epochs: map[string]uint64{}, started: cfg.Now(), standby: map[string]Roster{}}
 	if cfg.StateDir != "" {
+		l.files = statefile.NewWriter(cfg.StateDir, cfg.Logf)
 		raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "epochs.json"))
 		if err == nil {
 			err = json.Unmarshal(raw, &l.epochs)
@@ -268,17 +308,23 @@ func New(cfg Config) *Leader {
 	return l
 }
 
-// keep writes one state file whole; a failure is logged, since the state in memory is still right.
+// keep has one state file written whole, off the lock; a failure is logged, since the state in memory is still right.
 func (l *Leader) keep(name string, v any) {
-	if l.cfg.StateDir == "" {
+	if l.files == nil {
 		return
 	}
 	raw, err := json.Marshal(v)
-	if err == nil {
-		err = statefile.Write(filepath.Join(l.cfg.StateDir, name), raw)
-	}
 	if err != nil {
 		l.cfg.Logf("deplo-cluster: could not keep %s: %v", name, err)
+		return
+	}
+	l.files.Put(name, raw)
+}
+
+// Flush returns once every state file asked for so far is on disk.
+func (l *Leader) Flush() {
+	if l.files != nil {
+		l.files.Flush()
 	}
 }
 
@@ -529,6 +575,8 @@ func (c *cluster) place(kind, id string, replica int, member string) (lease.Entr
 type MemberView struct {
 	ID    string `json:"id"`
 	State string `json:"state"`
+	// Heard is a member that answered this leader since it took the epoch: until then its "ok" says nothing.
+	Heard bool `json:"heard"`
 }
 
 // ClusterView is one cluster as the snapshot shows it.
@@ -546,6 +594,8 @@ type ClusterView struct {
 	Succeed bool     `json:"succeed,omitempty"`
 	// Since is the event that began this epoch on this leader: a control plane that adopts it replays from there.
 	Since uint64 `json:"since,omitempty"`
+	// LedAt is when a quorum took the epoch this leader took without Deplo's word.
+	LedAt string `json:"ledAt,omitempty"`
 }
 
 // Move is one replica the leader moved or left waiting (Member empty), and why.
@@ -567,8 +617,11 @@ func (l *Leader) Snapshot() Snapshot {
 	s := Snapshot{Head: l.log.Head(), Clusters: map[string]ClusterView{}}
 	for id, c := range l.clusters {
 		v := ClusterView{Epoch: c.epoch, Superseded: c.superseded, Leads: c.leads(l.cfg.Now()), Members: []MemberView{}, Placement: append([]lease.Entry{}, c.placement...), Line: c.line(l.cfg.Now()), Succeed: c.succeed, Since: c.since}
+		if !c.ledAt.IsZero() {
+			v.LedAt = c.ledAt.UTC().Format(time.RFC3339Nano)
+		}
 		for _, m := range c.members {
-			v.Members = append(v.Members, MemberView{ID: m.ID, State: string(m.state)})
+			v.Members = append(v.Members, MemberView{ID: m.ID, State: string(m.state), Heard: m.heard})
 		}
 		sort.Slice(v.Members, func(i, j int) bool { return v.Members[i].ID < v.Members[j].ID })
 		v.Moves = []Move{}

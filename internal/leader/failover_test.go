@@ -22,6 +22,7 @@ import (
 
 type fo struct {
 	l      *leader.Leader
+	t      testing.TB
 	clk    *clock
 	ms     *members
 	store  *bundles.Store
@@ -62,7 +63,7 @@ func (f *fo) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 
 func startFO(t *testing.T, mem map[string]leader.Member) *fo {
 	t.Helper()
-	f := &fo{pathOK: true, blind: map[string]bool{}}
+	f := &fo{t: t, pathOK: true, blind: map[string]bool{}}
 	f.clk = &clock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
 	f.ms = newMembers()
 	f.ms.now = f.clk.Now
@@ -71,7 +72,7 @@ func startFO(t *testing.T, mem map[string]leader.Member) *fo {
 		t.Fatal(err)
 	}
 	f.dir = t.TempDir()
-	f.l = leader.New(leader.Config{Dial: f.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }})
+	f.l = newLeader(t, leader.Config{Dial: f.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store, PathOK: func() bool { return f.pathOK }, Logf: f.logf})
 	r := leader.Roster{Cluster: "clu_1", Epoch: 1}
 	for _, id := range []string{"srv_a", "srv_b", "srv_c"} {
 		if m, ok := mem[id]; ok {
@@ -495,13 +496,14 @@ func TestAWaitingWorkloadIsNamedInTheSnapshotAndStaysWhenTheRosterRepeatsIt(t *t
 func TestARestartedLeaderStillFailsOverWithoutTheControlPlane(t *testing.T) {
 	f := two(t)
 	state := t.TempDir()
-	first := leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: state, Bundles: f.store, PathOK: func() bool { return true }})
+	first := newLeader(t, leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: state, Bundles: f.store, PathOK: func() bool { return true }})
 	r := staleRoster("srv_a", "srv_b")
 	if err := first.SetRoster(r); err != nil {
 		t.Fatal(err)
 	}
 	// The process is replaced and nobody pushes a roster again.
-	f.l = leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: state, Bundles: f.store, PathOK: func() bool { return true }})
+	first.Flush()
+	f.l = newLeader(t, leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: state, Bundles: f.store, PathOK: func() bool { return true }})
 	if placed(f, "prj_1") != "srv_a" {
 		t.Fatalf("a restarted leader forgot its cluster: %q", placed(f, "prj_1"))
 	}

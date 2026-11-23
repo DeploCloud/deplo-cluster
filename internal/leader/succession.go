@@ -90,6 +90,10 @@ type SucceedAsk struct {
 	Cluster   string        `json:"cluster"`
 	Epoch     uint64        `json:"epoch"`
 	Placement []lease.Entry `json:"placement"`
+	// Gone and Heard are what the last renewal said: the members the old leader no longer counted, by certificate,
+	// and how many milliseconds ago each member was last heard. An older agent sends neither.
+	Gone  []string         `json:"gone,omitempty"`
+	Heard map[string]int64 `json:"heard,omitempty"`
 }
 
 // Succeed has this leader try to lead the cluster at the asked epoch, from the standby roster and the placement the
@@ -123,9 +127,36 @@ func (l *Leader) Succeed(a SucceedAsk) error {
 	if err := l.SetRoster(r); err != nil {
 		return err
 	}
+	l.inherit(a, now)
 	l.markSince(a.Cluster, r.Epoch)
 	l.cfg.Logf("deplo-cluster: cluster %s: its leader is silent and this server is next in line: trying to lead at epoch %d", a.Cluster, r.Epoch)
 	return nil
+}
+
+// inherit carries on what the old leader knew: when it last heard each member, and which it no longer counted.
+func (l *Leader) inherit(a SucceedAsk, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c := l.clusters[a.Cluster]
+	if c == nil || a.Heard == nil && a.Gone == nil {
+		return
+	}
+	for id, ms := range a.Heard {
+		if m := c.members[id]; m != nil && ms >= 0 {
+			m.inherited = latest(m.inherited, now.Add(-time.Duration(ms)*time.Millisecond))
+		}
+	}
+	gone := map[string]time.Time{}
+	for id, m := range c.members {
+		if slices.Contains(a.Gone, m.Fingerprint) {
+			gone[id] = now
+			if at, ok := c.gone[id]; ok {
+				gone[id] = at
+			}
+		}
+	}
+	c.gone = gone
+	l.saveFailover()
 }
 
 // markSince logs the epoch a try leads from when SetRoster did not, as on a second try at the epoch an earlier one

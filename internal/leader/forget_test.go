@@ -47,7 +47,8 @@ func TestForgetDropsTheClusterItsBundlesAndItsEpochAndSurvivesARestart(t *testin
 		t.Fatalf("a forget without a cluster: %v", r)
 	}
 
-	again := leader.New(leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store})
+	f.l.Flush()
+	again := newLeader(t, leader.Config{Dial: f.ms.dial, Now: f.clk.Now, StateDir: f.dir, Bundles: f.store})
 	snap = again.Snapshot()
 	if _, back := snap.Clusters["clu_1"]; back || snap.Clusters["clu_2"].Epoch != 4 {
 		t.Fatalf("clusters after a restart: %+v", snap.Clusters)

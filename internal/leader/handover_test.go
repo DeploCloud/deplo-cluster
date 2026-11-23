@@ -25,8 +25,8 @@ func leads(l *leader.Leader) (uint64, bool) {
 func TestTwoLeadersNeverLeadAtTheSameEpoch(t *testing.T) {
 	clk := &clock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
 	ms := newMembers()
-	remote := leader.New(leader.Config{Dial: ms.dial, Now: clk.Now})
-	own := leader.New(leader.Config{Dial: ms.dial, Now: clk.Now})
+	remote := newLeader(t, leader.Config{Dial: ms.dial, Now: clk.Now})
+	own := newLeader(t, leader.Config{Dial: ms.dial, Now: clk.Now})
 	ctx := context.Background()
 	check := func(step string) {
 		t.Helper()
@@ -102,7 +102,8 @@ func TestALeaderThatSteppedDownStaysDownAcrossARestart(t *testing.T) {
 	ms.epoch["fp-srv_a"] = 3
 	l.Tick(context.Background())
 
-	again := leader.New(leader.Config{Dial: ms.dial, Now: time.Now, StateDir: dir})
+	l.Flush()
+	again := newLeader(t, leader.Config{Dial: ms.dial, Now: time.Now, StateDir: dir})
 	if _, leading := leads(again); leading {
 		t.Fatal("a restarted leader leads a cluster it had stepped down from")
 	}
@@ -212,7 +213,7 @@ func TestARefusalOfAnOlderOrderDoesNotStopALeaderThatWasHandedANewerEpoch(t *tes
 		}()
 		return a, nil
 	}
-	l = leader.New(leader.Config{Dial: dial})
+	l = newLeader(t, leader.Config{Dial: dial})
 	if err := l.SetRoster(roster(2, "srv_a")); err != nil {
 		t.Fatal(err)
 	}

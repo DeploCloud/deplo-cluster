@@ -230,11 +230,12 @@ func TestAnEpochFileThatCannotBeReadKeepsTheLeaderFromLeadingOnItsOwn(t *testing
 	if err := l.SetRoster(roster(4, "srv_a", "srv_b")); err != nil {
 		t.Fatal(err)
 	}
+	l.Flush()
 	if err := os.WriteFile(filepath.Join(dir, "epochs.json"), []byte(`{"clu_1":`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var logged []string
-	again := leader.New(leader.Config{Dial: ms.dial, StateDir: dir, Logf: func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }})
+	again := newLeader(t, leader.Config{Dial: ms.dial, StateDir: dir, Logf: func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }})
 	if n := len(again.Snapshot().Clusters); n != 0 {
 		t.Fatalf("the leader serves %d clusters from a state it could not read", n)
 	}

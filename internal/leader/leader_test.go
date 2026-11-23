@@ -205,7 +205,7 @@ func start(t *testing.T, dir string) (*leader.Leader, *clock, *members) {
 	t.Helper()
 	clk := &clock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
 	ms := newMembers()
-	l := leader.New(leader.Config{Dial: ms.dial, Now: clk.Now, StateDir: dir})
+	l := newLeader(t, leader.Config{Dial: ms.dial, Now: clk.Now, StateDir: dir})
 	return l, clk, ms
 }
 
@@ -322,6 +322,7 @@ func TestAnOlderEpochIsRefusedAndTheHeldOneSurvivesARestart(t *testing.T) {
 	if err := l.SetRoster(roster(4, "srv_a")); !errors.Is(err, leader.ErrOlderEpoch) {
 		t.Fatalf("an older epoch was accepted: %v", err)
 	}
+	l.Flush()
 	again, _, _ := start(t, dir)
 	if err := again.SetRoster(roster(2, "srv_a")); !errors.Is(err, leader.ErrOlderEpoch) {
 		t.Fatalf("a restarted leader forgot its epoch: %v", err)

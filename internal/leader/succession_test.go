@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,13 +39,19 @@ func lined(t *testing.T) *fo {
 // heir is the leader beside srv_b, standing by with Deplo's roster; it shares f's members and clock.
 func heir(t *testing.T, f *fo) *fo {
 	t.Helper()
-	g := &fo{clk: f.clk, ms: f.ms, pathOK: true, dir: t.TempDir(), blind: map[string]bool{}}
+	return heirOn(t, f, "srv_b")
+}
+
+// heirOn is the leader beside self, standing by.
+func heirOn(t *testing.T, f *fo, self string) *fo {
+	t.Helper()
+	g := &fo{t: t, clk: f.clk, ms: f.ms, pathOK: true, dir: t.TempDir(), blind: map[string]bool{}}
 	var err error
 	if g.store, err = bundles.Open(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	g.l = leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store, PathOK: func() bool { return true }, StartGrace: -1, Logf: g.logf})
-	if err := g.l.Standby(withLine(snapshotRoster(f, 1), "srv_b")); err != nil {
+	g.l = newLeader(t, leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store, PathOK: func() bool { return true }, StartGrace: -1, Logf: g.logf})
+	if err := g.l.Standby(withLine(snapshotRoster(f, 1), self)); err != nil {
 		t.Fatal(err)
 	}
 	g.away = true
@@ -97,6 +104,9 @@ func TestTheHeirLeadsOnceNoMemberHearsTheLeaderAnyMore(t *testing.T) {
 	g.step()
 	if !leadsNow(g) || f.ms.epoch["fp-srv_c"] != 2 {
 		t.Fatalf("the heir does not lead once the members stopped hearing the leader: %+v", g.l.Snapshot().Clusters["clu_1"])
+	}
+	if at := g.l.Snapshot().Clusters["clu_1"].LedAt; at != f.clk.Now().UTC().Format(time.RFC3339Nano) {
+		t.Fatalf("the heir says it led at %q, not when a quorum took its epoch", at)
 	}
 	if o := f.lastOrder("fp-srv_c"); o.From != "srv_b" || !slices.Equal(o.Line, []string{"srv_c"}) || o.Last != "srv_deplo" {
 		t.Fatalf("the heir's renewal: from %q, line %v, last %q", o.From, o.Line, o.Last)
@@ -188,11 +198,12 @@ func TestAPreVoteGoesOnlyToAgentsThatAnswerIt(t *testing.T) {
 func TestAStandbyRosterOutlivesARestart(t *testing.T) {
 	f := lined(t)
 	g := heir(t, f)
-	again := leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store})
+	g.l.Flush()
+	again := newLeader(t, leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: g.dir, Bundles: g.store})
 	if err := again.Succeed(ask(f, 2)); err != nil {
 		t.Fatalf("a restarted heir lost its standby roster: %v", err)
 	}
-	if err := leader.New(leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: t.TempDir()}).Succeed(ask(f, 2)); err == nil {
+	if err := newLeader(t, leader.Config{Dial: g.dial, Now: g.clk.Now, StateDir: t.TempDir()}).Succeed(ask(f, 2)); err == nil {
 		t.Fatal("a leader with no standby roster tried to lead")
 	}
 }
@@ -209,7 +220,7 @@ func TestAnHeirLeadsWhileTheDeadLeadersServerTakesTheWholeSendTimeout(t *testing
 		}
 		return g.ms.dial(ctx, to)
 	}
-	g.l = leader.New(leader.Config{Dial: dead, Now: g.clk.Now, StateDir: t.TempDir(), Bundles: g.store, PathOK: func() bool { return true }, StartGrace: -1})
+	g.l = newLeader(t, leader.Config{Dial: dead, Now: g.clk.Now, StateDir: t.TempDir(), Bundles: g.store, PathOK: func() bool { return true }, StartGrace: -1})
 	if err := g.l.Standby(withLine(snapshotRoster(f, 1), "srv_b")); err != nil {
 		t.Fatal(err)
 	}
@@ -276,5 +287,76 @@ func TestASecondTryAtTheSameEpochIsReplayedFromWhereItBegan(t *testing.T) {
 	ev, _ := g.l.Events().Since(since - 1)
 	if since <= head || len(ev) == 0 || ev[0].Type != "epoch" || !slices.ContainsFunc(ev, func(e evlog.Event) bool { return e.Type == "succeeded" }) {
 		t.Fatalf("since %d (head before the try %d): a control plane cannot replay this epoch: %+v", since, head, ev)
+	}
+}
+
+// askAs is what member's agent hands the leader beside it: the last renewal's placement, gone set and heard times,
+// aged by `since`, the time that renewal is old.
+func askAs(f *fo, member string, epoch uint64, since time.Duration) leader.SucceedAsk {
+	o := f.lastOrder("fp-" + member)
+	heard := map[string]int64{}
+	for id, ms := range o.Heard {
+		heard[id] = ms + since.Milliseconds()
+	}
+	return leader.SucceedAsk{Cluster: "clu_1", Epoch: epoch, Placement: o.Placement, Gone: o.Gone, Heard: heard}
+}
+
+// eu, 23 Nov 2026, three servers: the leader's server and then the first heir's were powered off past the grace.
+// The heir never counted the first as gone, since it never heard it, and the next heir learnt no gone set: one of
+// three led nothing. Now the line carries what the leader knew, so the last one leads exactly half on Deplo's word.
+func TestTheSecondHeirLeadsExactlyHalfOnDeplosWordAfterTwoLossesOnThreeServers(t *testing.T) {
+	f := lined(t)
+	g, h := heir(t, f), heirOn(t, f, "srv_c")
+	f.ms.cut["fp-srv_a"] = true
+	g.blind["srv_a"], h.blind["srv_a"] = true, true
+	f.clk.Add(lease.PreVoteFor + time.Second)
+	if err := g.l.Succeed(askAs(f, "srv_b", 2, lease.PreVoteFor+time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	g.step()
+	if !leadsNow(g) {
+		t.Fatal("the first heir does not lead two of three")
+	}
+	// The grace is counted from when srv_a was last heard, not from the takeover 11 s later.
+	g.pass(leader.GoneAfter - lease.PreVoteFor)
+	if ev := g.events("member_gone"); len(ev) != 1 || !strings.Contains(ev[0], "srv_a") {
+		t.Fatalf("srv_a, last heard %v ago, is not gone for the heir: %v", leader.GoneAfter+time.Second, ev)
+	}
+	if o := f.lastOrder("fp-srv_c"); !slices.Equal(o.Gone, []string{"fp-srv_a"}) || o.Heard["srv_b"] > 2000 || o.Heard["srv_a"] < leader.GoneAfter.Milliseconds() {
+		t.Fatalf("a renewal names gone %v, heard %v", o.Gone, o.Heard)
+	}
+	f.ms.cut["fp-srv_b"] = true
+	h.blind["srv_b"] = true
+	h.away = false
+	f.clk.Add(lease.PreVoteFor + time.Second)
+	if err := h.l.Succeed(askAs(f, "srv_c", 3, lease.PreVoteFor+time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	h.pass(3 * time.Second)
+	if !leadsNow(h) || f.ms.epoch["fp-srv_c"] != 3 {
+		t.Fatalf("the second heir does not lead the half left on Deplo's word: %+v", h.l.Snapshot().Clusters["clu_1"])
+	}
+}
+
+// A member the leader has never heard is never said to answer: a leader that just took over says it has not heard it.
+func TestALeaderThatTookOverSaysNothingOfAMemberItHasNotHeard(t *testing.T) {
+	f := lined(t)
+	g := heir(t, f)
+	f.ms.cut["fp-srv_a"] = true
+	g.blind["srv_a"] = true
+	f.clk.Add(lease.PreVoteFor + time.Second)
+	if err := g.l.Succeed(ask(f, 2)); err != nil {
+		t.Fatal(err)
+	}
+	g.step()
+	for _, m := range g.l.Snapshot().Clusters["clu_1"].Members {
+		if want := m.ID != "srv_a"; m.Heard != want {
+			t.Fatalf("%s reads heard %v, want %v", m.ID, m.Heard, want)
+		}
+	}
+	for _, e := range g.events("member_state") {
+		if strings.Contains(e, "srv_a") && strings.Contains(e, `"ok"`) {
+			t.Fatalf("the heir said srv_a answers: %s", e)
+		}
 	}
 }
