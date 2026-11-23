@@ -51,14 +51,31 @@ type Relay struct {
 
 	mu       sync.Mutex
 	rosters  map[string]map[string]struct{} // cluster id -> party keys
-	sessions map[string]*session            // party key -> its one live connection
+	sessions map[string]*session            // party key and the address it dialed -> that live connection
+	seq      uint64
 	pipes    map[*pipe]struct{}
 }
 
 type session struct {
 	key   string
+	via   string
+	at    uint64
 	mux   *yamux.Session
 	close func()
+}
+
+// slot is one connection a party holds per address it dials: two names of this relay are two slots, not a swap.
+func (s *session) slot() string { return s.key + "|" + s.via }
+
+// partyLocked is a party's newest connection, or nil; the caller holds r.mu.
+func (r *Relay) partyLocked(key string) *session {
+	var best *session
+	for _, s := range r.sessions {
+		if s.key == key && (best == nil || s.at > best.at) {
+			best = s
+		}
+	}
+	return best
 }
 
 type pipe struct {
@@ -112,9 +129,9 @@ func (r *Relay) SetRoster(cluster string, parties []wire.Party) {
 // revalidate returns what to close now that the roster changed; the caller holds r.mu and runs the closers after releasing it.
 func (r *Relay) revalidate() []func() {
 	var cut []func()
-	for key, s := range r.sessions {
-		if !r.knownLocked(key) {
-			delete(r.sessions, key)
+	for slot, s := range r.sessions {
+		if !r.knownLocked(s.key) {
+			delete(r.sessions, slot)
 			cut = append(cut, s.close)
 		}
 	}
@@ -151,7 +168,15 @@ func (r *Relay) sharesLocked(a, b string) bool {
 func (r *Relay) Connected() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.sessions)
+	return r.partiesLocked()
+}
+
+func (r *Relay) partiesLocked() int {
+	keys := map[string]bool{}
+	for _, s := range r.sessions {
+		keys[s.key] = true
+	}
+	return len(keys)
 }
 
 type state struct {
@@ -262,7 +287,7 @@ func (r *Relay) hold(req *http.Request, ws *websocket.Conn) {
 		return
 	}
 	defer mux.Close()
-	s := &session{key: party.Key(), mux: mux, close: func() { mux.Close() }}
+	s := &session{key: party.Key(), via: strings.ToLower(req.Host), mux: mux, close: func() { mux.Close() }}
 	if !r.register(s) {
 		return
 	}
@@ -285,15 +310,17 @@ func (r *Relay) hold(req *http.Request, ws *websocket.Conn) {
 	}
 }
 
-// register keeps one connection per party, the newest; a party the roster does not name is refused.
+// register keeps one connection per party and address, the newest; a party the roster does not name is refused.
 func (r *Relay) register(s *session) bool {
 	r.mu.Lock()
 	if !r.knownLocked(s.key) {
 		r.mu.Unlock()
 		return false
 	}
-	old := r.sessions[s.key]
-	r.sessions[s.key] = s
+	r.seq++
+	s.at = r.seq
+	old := r.sessions[s.slot()]
+	r.sessions[s.slot()] = s
 	r.mu.Unlock()
 	if old != nil {
 		old.close()
@@ -303,8 +330,8 @@ func (r *Relay) register(s *session) bool {
 
 func (r *Relay) unregister(s *session) {
 	r.mu.Lock()
-	if r.sessions[s.key] == s {
-		delete(r.sessions, s.key)
+	if r.sessions[s.slot()] == s {
+		delete(r.sessions, s.slot())
 	}
 	r.mu.Unlock()
 }
@@ -325,7 +352,7 @@ func (r *Relay) handleStream(from *session, st *yamux.Stream) {
 	}
 	r.mu.Lock()
 	shared := r.sharesLocked(from.key, to.Key())
-	target := r.sessions[to.Key()]
+	target := r.partyLocked(to.Key())
 	r.mu.Unlock()
 	if !shared {
 		_ = wire.WriteHeader(st, wire.VerbErr, "not in the same cluster")
@@ -467,7 +494,7 @@ func (r *Relay) Admin() http.Handler {
 	})
 	mux.HandleFunc("POST /call/relay.status", func(w http.ResponseWriter, _ *http.Request) {
 		r.mu.Lock()
-		st := map[string]any{"connected": len(r.sessions), "clusters": len(r.rosters)}
+		st := map[string]any{"connected": r.partiesLocked(), "clusters": len(r.rosters)}
 		r.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(st)
 	})
