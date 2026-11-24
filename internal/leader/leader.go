@@ -103,6 +103,8 @@ type member struct {
 	answered time.Time
 	// inherited is when the leader before this one last heard it, as the heir that took over was told.
 	inherited time.Time
+	// sending is an order of a probe or renewal on its way to it, not answered yet.
+	sending bool
 }
 
 // lastHeard is when any leader of this cluster last heard the member, as far as this one knows; zero is never.

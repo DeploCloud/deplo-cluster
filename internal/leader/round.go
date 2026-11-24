@@ -53,6 +53,11 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 	}
 	var jobs []job
 	epochs := map[string]uint64{}
+	drain := p.announce || extend > 0
+	if drain {
+		// Every member must take an announcement or an extension: one still taking an earlier order takes it after.
+		l.quiet(sendTimeout)
+	}
 	now := l.cfg.Now()
 	l.mu.Lock()
 	for id, c := range l.clusters {
@@ -64,6 +69,10 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		noExtension := !probe && !p.prevote && !p.announce && extend == 0 && c.noExtension(now)
 		for _, m := range c.members {
 			if p.prevote && !m.Succession {
+				continue
+			}
+			// A member still taking the last order gets the next one once it answered, never two at a time.
+			if !p.prevote && m.sending {
 				continue
 			}
 			if probe {
@@ -83,6 +92,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 				c.extended[m.ID] = now.Add(lease.FenceAfter + extend)
 			}
 			_, out := c.gone[m.ID]
+			m.sending = !p.prevote
 			jobs = append(jobs, job{id, m.ID, m.Fingerprint, m, o, !out})
 		}
 	}
@@ -101,7 +111,13 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		go func() {
 			defer wg.Done()
 			// A gone member is renewed but does not vote until it is back and caught up.
-			if l.renew(ctx, j.cluster, j.id, j.fingerprint, j.m, j.order) && j.votes {
+			ok := l.renew(ctx, j.cluster, j.id, j.fingerprint, j.m, j.order)
+			if !p.prevote {
+				l.mu.Lock()
+				j.m.sending = false
+				l.mu.Unlock()
+			}
+			if ok && j.votes {
 				answered <- j.cluster
 			}
 		}()
@@ -109,18 +125,27 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 	finished := make(chan struct{})
 	go func() { wg.Wait(); close(finished) }()
 	heard := map[string]int{}
-	// A pre-vote takes nothing, so it is over once a quorum said yes: a dead member is not waited out.
+	// A pre-vote takes nothing, so it is over once a quorum said yes: a dead member is not waited out. A probe or a
+	// renewal waits stragglerWait more for the rest, then goes on: a slow member holds up only its own renewal.
+	var late <-chan time.Time
 	for waiting := true; waiting; {
 		select {
 		case id := <-answered:
 			heard[id]++
-			waiting = !p.prevote || !l.everyQuorum(epochs, heard, now)
-		case <-finished:
-			for len(answered) > 0 {
-				heard[<-answered]++
+			if l.everyQuorum(epochs, heard, now) {
+				waiting = !p.prevote
+				if late == nil && !drain {
+					late = time.After(stragglerWait)
+				}
 			}
+		case <-late:
+			waiting = false
+		case <-finished:
 			waiting = false
 		}
+	}
+	for len(answered) > 0 {
+		heard[<-answered]++
 	}
 	sent := map[string]int{}
 	for _, j := range jobs {
@@ -170,6 +195,26 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		tell()
 	}
 	return all
+}
+
+// stragglerWait is how long a probe or a renewal waits, once every cluster heard a quorum, for the members left.
+const stragglerWait = 300 * time.Millisecond
+
+// quiet waits, at most for d, until no member is still taking an order.
+func (l *Leader) quiet(d time.Duration) {
+	for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		l.mu.Lock()
+		busy := false
+		for _, c := range l.clusters {
+			for _, m := range c.members {
+				busy = busy || m.sending
+			}
+		}
+		l.mu.Unlock()
+		if !busy {
+			return
+		}
+	}
 }
 
 // everyQuorum says whether every cluster of a pass heard a quorum at its epoch.
