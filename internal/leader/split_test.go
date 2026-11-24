@@ -319,3 +319,28 @@ func TestWithMoreThanHalfGoneTheRestIsRenewedAgainOnceTheyAreRemoved(t *testing.
 		t.Fatal("the member that is left was not renewed once it was the whole cluster")
 	}
 }
+
+// Deplo asks its word to hold 8 s and beats every 2 s: a leader of exactly half stops renewing 8 s after the last
+// beat, not 20, and every reply says how much longer it holds the word, an earlier and longer one included.
+func TestDeplosWordHoldsOnlyAsLongAsDeploAsks(t *testing.T) {
+	f := two(t)
+	f.pass(10 * time.Second)
+	epochs := map[string]uint64{"clu_1": f.l.Snapshot().Clusters["clu_1"].Epoch}
+	if r := f.l.Beat(leader.Beat{Epochs: epochs, TrustMs: 8000}); r.HoldsMs != leader.DeploFor.Milliseconds() {
+		t.Fatalf("the reply says the word holds %d ms more, while an older beat's 20 s just began", r.HoldsMs)
+	}
+	f.away = true
+	f.pass(leader.DeploFor + time.Second)
+	if r := f.l.Beat(leader.Beat{Epochs: epochs, TrustMs: 8000}); r.HoldsMs != 8000 {
+		t.Fatalf("once the older word is over the reply says %d ms, want 8000", r.HoldsMs)
+	}
+	f.ms.cut["fp-srv_a"] = true
+	last := f.clk.Now()
+	f.pass(15 * time.Second)
+	if renewed := f.ms.leaseEnd("fp-srv_b").Add(-lease.FenceAfter); renewed.Sub(last) > 8*time.Second+time.Second {
+		t.Fatalf("with exactly half, srv_b was renewed %s after Deplo's last 8 s word", renewed.Sub(last))
+	}
+	if r := f.l.Beat(leader.Beat{Epochs: epochs}); r.HoldsMs != leader.DeploFor.Milliseconds() {
+		t.Fatalf("a beat that asks nothing holds %d ms, want DeploFor", r.HoldsMs)
+	}
+}

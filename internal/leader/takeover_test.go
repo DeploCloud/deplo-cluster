@@ -348,3 +348,28 @@ func TestATakeoverKeepsTheRosterForAMemberTooOldToSayWhatItRuns(t *testing.T) {
 	}
 	t.Fatalf("no line says srv_b keeps the roster: %q", g.logged)
 }
+
+// An agent Deplo knows kills its stacks all at once (QuickStop) is surely stopped 13 s after its lease ran out,
+// not 21: the dead member's database moves 8 s sooner, never before the 5 s lease and those 13 s are over.
+func TestATakeoverMovesAQuickStoppingMembersDatabaseSooner(t *testing.T) {
+	f := two(t)
+	newer(f)
+	f.putDB(t, "db_1", "db-main", backup(""))
+	f.pass(10 * time.Second)
+	f.ms.cut["fp-srv_a"] = true
+	r := shortFences(snapshotRoster(f, f.l.Snapshot().Clusters["clu_1"].Epoch+1))
+	for i := range r.Members {
+		r.Members[i].QuickStop = true
+	}
+	g := takeOverWith(t, f, r)
+	g.putDB(t, "db_1", "db-main", backup(""))
+
+	g.pass(15 * time.Second)
+	if placed(g, "db_1") != "srv_a" {
+		t.Fatalf("after 15 s the database moved to %q, before its member's lease and stop were over", placed(g, "db_1"))
+	}
+	g.pass(5 * time.Second)
+	if placed(g, "db_1") != "srv_b" {
+		t.Fatalf("after 20 s the database is still on %q", placed(g, "db_1"))
+	}
+}
