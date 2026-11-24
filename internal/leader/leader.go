@@ -498,7 +498,7 @@ type Beat struct {
 // control plane waits that out before it names another leader.
 type BeatReply struct {
 	OK      bool  `json:"ok"`
-	TrustMs int64 `json:"trustMs"`
+	HoldsMs int64 `json:"holdsMs"`
 }
 
 // Trust is how long a beat's word holds here.
@@ -532,7 +532,7 @@ func (l *Leader) Beat(b Beat) BeatReply {
 			l.cfg.Logf("deplo-cluster: cluster %s is led at epoch %d now, newer than %d: stepping down", id, epoch, c.epoch)
 		}
 	}
-	return BeatReply{OK: true, TrustMs: held.Milliseconds()}
+	return BeatReply{OK: true, HoldsMs: held.Milliseconds()}
 }
 
 // Assign records where the leader put one workload and tells the control plane.
