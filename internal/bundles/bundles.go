@@ -29,7 +29,9 @@ type Meta struct {
 	LimitMB     int      `json:"limitMb"`
 	PeakMB      int      `json:"peakMb"`
 	HasDomain   bool     `json:"hasDomain"`
-	CreatedAt   string   `json:"createdAt"`
+	// DiskBytes is what its data takes, as Deplo last measured it: no member is given it without that room.
+	DiskBytes int64  `json:"diskBytes,omitempty"`
+	CreatedAt string `json:"createdAt"`
 	// Restore names the backup the bundle restores from. Put reads it from the bundle itself, never from the caller.
 	Restore *RestoreRef `json:"restore,omitempty"`
 	// Promotes says the bundle knows how to promote a standby copy. Put reads it from the bundle itself too.

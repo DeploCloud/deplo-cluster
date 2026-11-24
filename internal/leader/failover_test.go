@@ -32,6 +32,8 @@ type fo struct {
 	blind map[string]bool
 	// certs is the certificates put bundles carry, as JSON.
 	certs string
+	// diskBytes is what put bundles say their data takes.
+	diskBytes int64
 	// away is Deplo down, or cut off from this leader: no beat reaches it.
 	away bool
 	// logged is what the leader logged, when a test asked for it.
@@ -102,7 +104,7 @@ func (f *fo) put(t *testing.T, id, slug, created string, domain bool) {
 	raw, _ := json.Marshal(b)
 	w.Write(raw)
 	w.Close()
-	if err := f.store.Put("clu_1", "app", id, "dep_"+id, out.Bytes(), bundles.Meta{Name: slug, HasDomain: domain, CreatedAt: created}); err != nil {
+	if err := f.store.Put("clu_1", "app", id, "dep_"+id, out.Bytes(), bundles.Meta{Name: slug, HasDomain: domain, CreatedAt: created, DiskBytes: f.diskBytes}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -408,6 +410,35 @@ func TestAMemberWhoseAgentCannotStartAMovedAppIsNeverChosen(t *testing.T) {
 	// A new App is still placed on it by the control plane: only a move needs the newer agent.
 	if ans, _ := f.l.Place(leader.PlaceRequest{Cluster: "clu_1", Workload: placementWorkload("prj_9")}); ans.Member != "srv_b" {
 		t.Fatalf("answer %+v", ans)
+	}
+}
+
+// A failover never takes an App to a member its data would leave with less than a tenth of its disk free, and with
+// none that has the room it waits where it is (deplo ADR-0043).
+func TestAFailoverNeverTakesAnAppToAMemberWithoutRoomForItsData(t *testing.T) {
+	tight, full := roomy("amd64"), roomy("amd64")
+	tight.FreeMB, tight.DiskFree, tight.DiskTotal = 8192, 2<<30, 10<<30
+	full.DiskFree, full.DiskTotal = 1<<30, 10<<30
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": tight, "srv_c": {Arch: "amd64", FreeMB: 1024, DiskFree: 5 << 30, DiskTotal: 10 << 30}})
+	f.diskBytes = 2 << 30
+	f.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
+	f.assign(t, "prj_1", "web", "srv_a")
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(85 * time.Second)
+	if placed(f, "prj_1") != "srv_c" || len(f.ms.starts["fp-srv_b"]) != 0 {
+		t.Fatalf("placed on %q, start orders to the member without room %d", placed(f, "prj_1"), len(f.ms.starts["fp-srv_b"]))
+	}
+	g := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": tight, "srv_c": full})
+	g.diskBytes = 2 << 30
+	g.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
+	g.assign(t, "prj_1", "web", "srv_a")
+	g.ms.cut["fp-srv_a"] = true
+	g.pass(85 * time.Second)
+	if len(g.ms.starts["fp-srv_b"])+len(g.ms.starts["fp-srv_c"]) != 0 {
+		t.Fatalf("a start order went to a member without room: %d, %d", len(g.ms.starts["fp-srv_b"]), len(g.ms.starts["fp-srv_c"]))
+	}
+	if p := placed(g, "prj_1"); p != "" && p != "srv_a" {
+		t.Fatalf("placed on %q", p)
 	}
 }
 

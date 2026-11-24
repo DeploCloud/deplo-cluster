@@ -166,3 +166,40 @@ func TestSpreadRefusesWhenAReplicaHasNoRoom(t *testing.T) {
 		t.Fatalf("refusal %+v", r)
 	}
 }
+
+// eu, 24 Nov 2026: two new Apps landed on the member with the least room. A member whose disk would be left with
+// less than a tenth free is never chosen, at a deploy or a failover.
+func TestAMemberWithoutRoomForTheDataIsNeverChosen(t *testing.T) {
+	w := web()
+	w.DiskBytes = 2 << 30
+	roomy, tight := member("a", 1024, 5), member("b", 8192, 0)
+	roomy.DiskFree, roomy.DiskTotal = 5<<30, 10<<30
+	tight.DiskFree, tight.DiskTotal = 3<<30-1, 10<<30
+	if a := place(t, w, roomy, tight); a.Member != "a" {
+		t.Fatalf("placed on %q", a.Member)
+	}
+	// It holds the data whole already: a copy promoted in place takes nothing more.
+	tight.Holds = []string{w.ID}
+	if a := place(t, w, tight); a.Member != "b" {
+		t.Fatalf("a member that holds the data: %+v", a)
+	}
+	tight.Holds = nil
+	a := place(t, w, tight)
+	if a.Refusal == nil || a.Refusal.Reason != NoDisk || a.Refusal.NeededBytes != 2<<30 {
+		t.Fatalf("no member with room: %+v", a)
+	}
+	// A new App holds nothing yet, and still never lands on a disk already under a tenth free.
+	w.DiskBytes = 0
+	tight.DiskFree = 1<<30 - 1
+	if a := place(t, w, tight); a.Refusal == nil || a.Refusal.Reason != NoDisk {
+		t.Fatalf("a disk under a tenth free: %+v", a)
+	}
+	// The member that runs it keeps it, and a disk nobody measured fits.
+	tight.Placed = []string{w.ID}
+	if a := place(t, w, tight); a.Member != "b" {
+		t.Fatalf("the member that runs it: %+v", a)
+	}
+	if a := place(t, w, member("c", 1024, 0)); a.Member != "c" {
+		t.Fatalf("an unknown disk: %+v", a)
+	}
+}
