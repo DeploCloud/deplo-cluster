@@ -67,6 +67,10 @@ type Member struct {
 	Images       []string `json:"images,omitempty"`
 	Emptying     bool     `json:"emptying,omitempty"`
 	DatabaseEnvs []string `json:"databaseEnvs,omitempty"`
+	// DiskFree, DiskTotal and Holds are its disk and the workloads whose data it holds whole (deplo ADR-0043).
+	DiskFree  int64    `json:"diskFree,omitempty"`
+	DiskTotal int64    `json:"diskTotal,omitempty"`
+	Holds     []string `json:"holds,omitempty"`
 	// NoFailover is a member whose agent cannot start a moved workload: it keeps what it runs and takes over nothing.
 	NoFailover bool `json:"noFailover,omitempty"`
 	// NoRestore is a member whose agent cannot restore a backup before a start: it is given no workload that needs one.

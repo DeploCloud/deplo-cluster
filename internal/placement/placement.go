@@ -17,6 +17,8 @@ const (
 	NoArchitecture Reason = "no_architecture"
 	NoImage        Reason = "no_image"
 	NoRoom         Reason = "no_room"
+	// NoDisk is no member whose disk keeps a tenth free once the workload's data is on it (deplo ADR-0043).
+	NoDisk Reason = "no_disk"
 )
 
 // Workload is what is being placed.
@@ -30,6 +32,8 @@ type Workload struct {
 	Archs   []string `json:"archs"`
 	LimitMB int      `json:"limitMb"`
 	PeakMB  int      `json:"peakMb"`
+	// DiskBytes is what its data takes on a member that holds none of it yet; 0 is none, or unknown.
+	DiskBytes int64 `json:"diskBytes,omitempty"`
 }
 
 // Member is what the leader knows about one server of the cluster.
@@ -45,6 +49,24 @@ type Member struct {
 	DatabaseEnvs []string `json:"databaseEnvs"`
 	// Placed lists the ids of the workloads (a replica each) this member runs.
 	Placed []string `json:"placed"`
+	// DiskFree and DiskTotal are its disk; a total of 0 is unknown, and fits anything.
+	DiskFree  int64 `json:"diskFree,omitempty"`
+	DiskTotal int64 `json:"diskTotal,omitempty"`
+	// Holds lists the workloads whose data it holds whole already: they take no more of its disk.
+	Holds []string `json:"holds,omitempty"`
+}
+
+// DiskFits says whether w's data leaves a tenth of m's disk free. Data it holds whole takes nothing more, and the
+// member that runs it keeps it; an unknown disk fits.
+func DiskFits(w Workload, m Member) bool {
+	if m.DiskTotal <= 0 || slices.Contains(m.Placed, w.ID) {
+		return true
+	}
+	need := w.DiskBytes
+	if slices.Contains(m.Holds, w.ID) {
+		need = 0
+	}
+	return m.DiskFree-need >= m.DiskTotal/10
 }
 
 // Refusal is the structured answer when nothing fits; the control plane writes the sentence.
@@ -53,6 +75,8 @@ type Refusal struct {
 	NeededMB int    `json:"neededMb"`
 	Cluster  string `json:"cluster"`
 	Workload string `json:"workload"`
+	// NeededBytes is the workload's data, for a refusal for disk.
+	NeededBytes int64 `json:"neededBytes,omitempty"`
 }
 
 // Answer is a member or a refusal.
@@ -81,7 +105,7 @@ func Place(cluster string, w Workload, members []Member) Answer {
 	refuse := func(r Reason) Answer {
 		return Answer{Refusal: &Refusal{Reason: r, NeededMB: need, Cluster: cluster, Workload: w.ID}}
 	}
-	var live, arch, image, fit []Member
+	var live, arch, image, disk, fit []Member
 	for _, m := range members {
 		if m.Online && m.Leased && !m.Emptying {
 			live = append(live, m)
@@ -98,6 +122,11 @@ func Place(cluster string, w Workload, members []Member) Answer {
 		}
 	}
 	for _, m := range image {
+		if DiskFits(w, m) {
+			disk = append(disk, m)
+		}
+	}
+	for _, m := range disk {
 		if m.FreeMB >= need {
 			fit = append(fit, m)
 		}
@@ -109,6 +138,10 @@ func Place(cluster string, w Workload, members []Member) Answer {
 		return refuse(NoArchitecture)
 	case len(image) == 0:
 		return refuse(NoImage)
+	case len(disk) == 0:
+		a := refuse(NoDisk)
+		a.Refusal.NeededBytes = w.DiskBytes
+		return a
 	case len(fit) == 0:
 		return refuse(NoRoom)
 	}
@@ -186,6 +219,7 @@ func Spread(cluster string, w Workload, members []Member, n int, current []strin
 		}
 		take(i, ans.Member)
 		facts[at[ans.Member]].FreeMB -= Needed(w)
+		facts[at[ans.Member]].DiskFree -= w.DiskBytes
 	}
 	return out, nil
 }

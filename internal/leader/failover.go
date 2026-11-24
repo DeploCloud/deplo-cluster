@@ -243,7 +243,8 @@ func (c *cluster) memberFacts(now time.Time) []placement.Member {
 		// A gone member hosts nothing until it counts again.
 		live := now.Sub(m.lastAck) < lease.NotRespondingAfter && !isGone
 		out = append(out, placement.Member{ID: id, Online: live, Leased: live, Emptying: m.Emptying, Arch: m.Arch,
-			Images: m.Images, FreeMB: m.FreeMB, Workloads: len(placed[id]), DatabaseEnvs: m.DatabaseEnvs, Placed: placed[id]})
+			Images: m.Images, FreeMB: m.FreeMB, Workloads: len(placed[id]), DatabaseEnvs: m.DatabaseEnvs, Placed: placed[id],
+			DiskFree: m.DiskFree, DiskTotal: m.DiskTotal, Holds: m.Holds})
 	}
 	return out
 }
@@ -276,6 +277,9 @@ func (l *Leader) Place(r PlaceRequest) (placement.Answer, error) {
 	for i, f := range facts {
 		if g, ok := given[f.ID]; ok {
 			f.Arch, f.Images, f.FreeMB, f.Emptying, f.DatabaseEnvs = g.Arch, g.Images, g.FreeMB, g.Emptying, g.DatabaseEnvs
+			if g.DiskTotal > 0 {
+				f.DiskFree, f.DiskTotal, f.Holds = g.DiskFree, g.DiskTotal, g.Holds
+			}
 			if g.Workloads > f.Workloads {
 				f.Workloads = g.Workloads
 			}
@@ -498,7 +502,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 				facts = append(facts, f)
 			}
 		}
-		w := placement.Workload{Kind: kind, ID: id, Name: meta.Name, Environment: meta.Environment, Image: meta.Image, Archs: meta.Archs, LimitMB: meta.LimitMB, PeakMB: meta.PeakMB}
+		w := placement.Workload{Kind: kind, ID: id, Name: meta.Name, Environment: meta.Environment, Image: meta.Image, Archs: meta.Archs, LimitMB: meta.LimitMB, PeakMB: meta.PeakMB, DiskBytes: meta.DiskBytes}
 		if n := countOn(c.placement, kind, id, ""); n > 1 && !spread {
 			w.LimitMB = placement.Needed(w) * n
 		}
@@ -511,6 +515,10 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		// Taken now, not at the commit: another start may be placed while this one runs.
 		need := placement.Needed(w)
 		target.FreeMB -= need
+		// ponytail: a start that fails keeps this until Deplo's next roster; the leader alone then errs on room.
+		if !slices.Contains(target.Holds, id) {
+			target.DiskFree -= meta.DiskBytes
+		}
 		next := append([]lease.Entry(nil), c.placement...)
 		moved := false
 		for i := range next {

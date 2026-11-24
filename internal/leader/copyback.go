@@ -136,7 +136,7 @@ func (l *Leader) copyBack(ctx context.Context, g copyGift) {
 		l.mu.Unlock()
 		return
 	}
-	w := placement.Workload{Kind: g.e.Kind, ID: g.e.ID, Name: meta.Name, Environment: meta.Environment, Image: meta.Image, Archs: meta.Archs, LimitMB: meta.LimitMB, PeakMB: meta.PeakMB}
+	w := placement.Workload{Kind: g.e.Kind, ID: g.e.ID, Name: meta.Name, Environment: meta.Environment, Image: meta.Image, Archs: meta.Archs, LimitMB: meta.LimitMB, PeakMB: meta.PeakMB, DiskBytes: meta.DiskBytes}
 	to := ""
 	for _, f := range c.memberFacts(now) {
 		if to == "" && slices.Contains(candidates, f.ID) && placement.Place(g.cluster, w, []placement.Member{f}).Refusal == nil {
