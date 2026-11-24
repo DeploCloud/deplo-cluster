@@ -591,6 +591,14 @@ func (c *cluster) mayStart(kind, id string, replica int, from string, waited boo
 	return entry, ""
 }
 
+func mapIn[V any](keys []string, m map[string]V) []V {
+	out := make([]V, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, m[k])
+	}
+	return out
+}
+
 // unreserve returns the memory a start that did not count had taken on its member.
 func (l *Leader) unreserve(clusterID, member string, mb int) {
 	l.mu.Lock()
@@ -1070,15 +1078,32 @@ func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 			moved = append(moved, e.ID)
 		}
 	}
-	// Databases one at a time and first, as their Apps need them; then every App at once, so a slow start holds
-	// none of the others (eu, 24 Nov 2026: lab-web waited 25 s behind fise's start).
-	var wg sync.WaitGroup
+	// Databases one at a time and first, as their Apps need them. Then each App with data on its own, so a slow
+	// start holds none of the others (eu, 24 Nov 2026: lab-web waited 25 s behind fise), beside the Apps without
+	// data, still one after another: those stop moving once their member answers again mid-pass.
+	var plain []lease.Entry
+	var ids []string
+	writers := map[string][]lease.Entry{}
 	for _, e := range Order(movable, meta) {
-		if e.Kind == "database" {
+		switch {
+		case e.Kind == "database":
 			do(e)
-			continue
+		case e.SingleWriter:
+			if writers[e.ID] == nil {
+				ids = append(ids, e.ID)
+			}
+			writers[e.ID] = append(writers[e.ID], e)
+		default:
+			plain = append(plain, e)
 		}
-		wg.Go(func() { do(e) })
+	}
+	var wg sync.WaitGroup
+	for _, chain := range append([][]lease.Entry{plain}, mapIn(ids, writers)...) {
+		wg.Go(func() {
+			for _, e := range chain {
+				do(e)
+			}
+		})
 	}
 	wg.Wait()
 	if again {
