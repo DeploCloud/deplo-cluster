@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DeploCloud/deplo-cluster/internal/bundles"
@@ -25,6 +26,8 @@ const (
 	FailoverAfter = 5 * time.Second
 	// fenceMargin is what an older member's fence takes to stop its stacks once its lease ran out.
 	fenceMargin = 21 * time.Second
+	// quickMargin is the same for an agent that kills its stacks all at once (QuickStop): 11 s, and 2 s to spare.
+	quickMargin = 13 * time.Second
 	// RetryEvery is how often work that found no room is placed again.
 	RetryEvery = 30 * time.Second
 	// maxStartTries bounds the members tried for one workload in one pass.
@@ -366,7 +369,7 @@ func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error 
 	// A start renews the member's lease too, when it lands: until it is over, its fence counts from its end.
 	l.startsTo(o, 1)
 	defer l.startsTo(o, -1)
-	// ponytail: one start at a time, so a long restore holds the Apps behind it; run restores beside them if that hurts.
+	// ponytail: a member's databases start one at a time, so a long restore holds the next database behind it.
 	limit := lease.StartTimeout
 	if o.Start.Restore != nil {
 		limit = lease.RestoreTimeout
@@ -505,6 +508,9 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 			return outcome{refusal: ans.Refusal}
 		}
 		target := c.members[ans.Member]
+		// Taken now, not at the commit: another start may be placed while this one runs.
+		need := placement.Needed(w)
+		target.FreeMB -= need
 		next := append([]lease.Entry(nil), c.placement...)
 		moved := false
 		for i := range next {
@@ -530,6 +536,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		began := time.Now()
 		if err := l.sendStart(ctx, fp, order); err != nil {
 			l.endStart(clusterID, key)
+			l.unreserve(clusterID, ans.Member, need)
 			l.cfg.Logf("deplo-cluster: %s could not start %s: %v", ans.Member, b.Stack.Slug, err)
 			exclude[ans.Member] = true
 			continue
@@ -539,7 +546,8 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		entry.Kind, entry.ID, entry.Replica = kind, id, replica
 		entry.Member = ans.Member
-		if why := l.commit(clusterID, entry, placement.Needed(w), from, b.Restore, time.Since(began), false, order.Epoch, check); why != "" {
+		if why := l.commit(clusterID, entry, 0, from, b.Restore, time.Since(began), false, order.Epoch, check); why != "" {
+			l.unreserve(clusterID, ans.Member, need)
 			return outcome{skipped: true, why: why}
 		}
 		l.noteDatabaseEnv(clusterID, kind, ans.Member, meta.Environment)
@@ -581,6 +589,15 @@ func (c *cluster) mayStart(kind, id string, replica int, from string, waited boo
 		return entry, StillAnswering
 	}
 	return entry, ""
+}
+
+// unreserve returns the memory a start that did not count had taken on its member.
+func (l *Leader) unreserve(clusterID, member string, mb int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if c := l.clusters[clusterID]; c != nil && c.members[member] != nil {
+		c.members[member].FreeMB += mb
+	}
 }
 
 // endStart forgets a start that is over, so the workload is shown where it is recorded again.
@@ -950,7 +967,15 @@ func (c *cluster) presumedAlive(m *member, now time.Time) bool {
 	} else if c.unsure.After(end) {
 		end = c.unsure
 	}
-	return now.Before(end.Add(fenceMargin))
+	return now.Before(end.Add(c.marginFor(m)))
+}
+
+// marginFor is how long after its lease ran out the member has surely stopped its stacks.
+func (c *cluster) marginFor(m *member) time.Duration {
+	if c.vouched && m.ShortFence && m.QuickStop {
+		return quickMargin
+	}
+	return fenceMargin
 }
 
 // leaseFor is the longest lease another leader may have given a member, extensions aside: the short one only
@@ -965,7 +990,7 @@ func (c *cluster) leaseFor(m *member) time.Duration {
 // stopped says a silent member has surely stopped its single-writer workloads by now, by its own word or an
 // older member's fence.
 func (c *cluster) stopped(m *member, now time.Time) bool {
-	within := c.leaseFor(m) + fenceMargin
+	within := c.leaseFor(m) + c.marginFor(m)
 	if m.stoppedWithin > 0 {
 		within = m.stoppedWithin
 	}
@@ -1028,8 +1053,11 @@ func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 	}
 	moved, waiting := []string{}, []left{}
 	again := false
-	for _, e := range Order(movable, meta) {
+	var mu sync.Mutex
+	do := func(e lease.Entry) {
 		o := l.relocate(ctx, j.cluster, e.Kind, e.ID, e.Replica, j.from, false, nil)
+		mu.Lock()
+		defer mu.Unlock()
 		switch {
 		case o.skipped:
 			again = again || o.again
@@ -1042,6 +1070,17 @@ func (l *Leader) runJob(ctx context.Context, j failoverJob) {
 			moved = append(moved, e.ID)
 		}
 	}
+	// Databases one at a time and first, as their Apps need them; then every App at once, so a slow start holds
+	// none of the others (eu, 24 Nov 2026: lab-web waited 25 s behind fise's start).
+	var wg sync.WaitGroup
+	for _, e := range Order(movable, meta) {
+		if e.Kind == "database" {
+			do(e)
+			continue
+		}
+		wg.Go(func() { do(e) })
+	}
+	wg.Wait()
 	if again {
 		// What this pass could not decide is not dealt with: the next pass looks at the member afresh.
 		l.mu.Lock()

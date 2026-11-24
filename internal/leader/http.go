@@ -57,8 +57,7 @@ func (l *Leader) Handler() http.Handler {
 	mux.HandleFunc("POST /call/leader.beat", func(w http.ResponseWriter, r *http.Request) {
 		var req Beat
 		if decode(w, r, &req) {
-			l.Beat(req)
-			reply(w, map[string]bool{"ok": true})
+			reply(w, l.Beat(req))
 		}
 	})
 	mux.HandleFunc("POST /call/leader.forget", func(w http.ResponseWriter, r *http.Request) {

@@ -518,3 +518,33 @@ func TestARestartedLeaderStillFailsOverWithoutTheControlPlane(t *testing.T) {
 		t.Fatalf("placed on %q after a restart", placed(f, "prj_1"))
 	}
 }
+
+// eu, 24 Nov 2026: lab-web started 25 s after fise, its start queued behind fise's. A silent member's Apps start
+// together; a slow start holds none of the others.
+func TestASlowStartHoldsNoOtherApp(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64")})
+	f.put(t, "prj_1", "slow", "2026-01-01T00:00:00Z", true)
+	f.put(t, "prj_2", "quick", "2026-01-02T00:00:00Z", true)
+	f.assign(t, "prj_1", "slow", "srv_a")
+	f.assign(t, "prj_2", "quick", "srv_a")
+	quick := make(chan struct{})
+	f.ms.onStart = func(_ string, o lease.Order) {
+		if o.Start.Slug == "quick" {
+			close(quick)
+			return
+		}
+		select {
+		case <-quick:
+		case <-time.After(3 * time.Second):
+		}
+	}
+	f.ms.cut["fp-srv_a"] = true
+	began := time.Now()
+	f.pass(6 * time.Second)
+	if took := time.Since(began); took >= 3*time.Second {
+		t.Fatalf("the quick App's start waited %s for the slow one's", took)
+	}
+	if placed(f, "prj_1") != "srv_b" || placed(f, "prj_2") != "srv_b" {
+		t.Fatalf("slow on %q, quick on %q", placed(f, "prj_1"), placed(f, "prj_2"))
+	}
+}

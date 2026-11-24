@@ -73,6 +73,8 @@ type Member struct {
 	NoRestore bool `json:"noRestore,omitempty"`
 	// ShortFence is a member whose agent keeps to the fence its leader gives it, as Deplo knows from its version.
 	ShortFence bool `json:"shortFence,omitempty"`
+	// QuickStop is a member whose agent stops its stacks within quickMargin of its lease running out.
+	QuickStop bool `json:"quickStop,omitempty"`
 	// Succession is a member whose agent answers a pre-vote and gives each epoch to one leader only.
 	Succession bool `json:"succession,omitempty"`
 }
@@ -144,8 +146,8 @@ type cluster struct {
 	// sure is when the last round began that a quorum answered at this epoch, and heard how many did.
 	sure  time.Time
 	heard int
-	// deplo is when the control plane last named this epoch to this leader.
-	deplo time.Time
+	// deploUntil is how long the control plane's last word for this epoch holds here.
+	deploUntil time.Time
 	// starting is the workloads a start order is out for, until it has an outcome.
 	starting map[string]bool
 	// gone is the members silent past GoneAfter that no longer count for a majority, and since when (ADR-0049).
@@ -193,7 +195,7 @@ func (c *cluster) goneFingerprints() []string {
 // half while the control plane names its epoch. The other half's leader has no such word, so only one leads.
 func (c *cluster) quorum(heard int, now time.Time) bool {
 	n := c.voters()
-	return heard*2 > n || (heard > 0 && heard*2 == n && now.Sub(c.deplo) < DeploFor)
+	return heard*2 > n || (heard > 0 && heard*2 == n && now.Before(c.deploUntil))
 }
 
 // leads says this leader may renew, extend and move: a quorum took its epoch within SureFor. One that may
@@ -401,7 +403,7 @@ func (l *Leader) SetRoster(r Roster) error {
 	again := c.epoch != 0 && r.Epoch > c.epoch
 	if again {
 		c.auth, c.waiting, c.moved = map[string]authority{}, map[string]*Waiting{}, map[string]bool{}
-		c.sure, c.deplo = time.Time{}, time.Time{}
+		c.sure, c.deploUntil = time.Time{}, time.Time{}
 		c.vouched, c.unsure = false, time.Time{}
 	}
 	now := l.cfg.Now()
@@ -488,20 +490,39 @@ func (l *Leader) Forget(clusterID string) error {
 // Beat is the control plane saying, every few seconds, at which epoch each cluster is led.
 type Beat struct {
 	Epochs map[string]uint64 `json:"epochs"`
+	// TrustMs is how long the control plane asks its word to hold; never longer than DeploFor, which an older one gets.
+	TrustMs int64 `json:"trustMs,omitempty"`
+}
+
+// BeatReply says how much longer this leader holds Deplo's word, an earlier and longer one included, so the
+// control plane waits that out before it names another leader.
+type BeatReply struct {
+	OK      bool  `json:"ok"`
+	TrustMs int64 `json:"trustMs"`
+}
+
+// Trust is how long a beat's word holds here.
+func (b Beat) Trust() time.Duration {
+	if t := time.Duration(b.TrustMs) * time.Millisecond; t > 0 && t < DeploFor {
+		return t
+	}
+	return DeploFor
 }
 
 // Beat notes the control plane's word for the clusters led here at that epoch. A newer epoch means another
 // leader was handed the cluster: this one stops, and leads again only from a roster at least that new.
-func (l *Leader) Beat(b Beat) {
+func (l *Leader) Beat(b Beat) BeatReply {
 	now := l.cfg.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	held := b.Trust()
 	for id, epoch := range b.Epochs {
 		c := l.clusters[id]
 		switch {
 		case c == nil || epoch < c.epoch:
 		case epoch == c.epoch:
-			c.deplo = now
+			c.deploUntil = latest(c.deploUntil, now.Add(b.Trust()))
+			held = max(held, c.deploUntil.Sub(now))
 		case !c.superseded:
 			c.superseded = true
 			if epoch > l.epochs[id] {
@@ -511,6 +532,7 @@ func (l *Leader) Beat(b Beat) {
 			l.cfg.Logf("deplo-cluster: cluster %s is led at epoch %d now, newer than %d: stepping down", id, epoch, c.epoch)
 		}
 	}
+	return BeatReply{OK: true, TrustMs: held.Milliseconds()}
 }
 
 // Assign records where the leader put one workload and tells the control plane.

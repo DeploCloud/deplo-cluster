@@ -387,3 +387,36 @@ func TestAnHeirStillTryingToLeadSaysNothingOfItsMembers(t *testing.T) {
 		t.Fatalf("an heir still trying said %v", ev)
 	}
 }
+
+// eu, 24 Nov 2026: an heir's pre-vote waited 2 s for the dead leader's member. A pre-vote takes nothing, so its
+// tally is in once a quorum said yes; only the probe, whose answers say what each member runs, hears everyone.
+func TestAPreVoteIsOverOnceAQuorumSaidYes(t *testing.T) {
+	f := lined(t)
+	g := heir(t, f)
+	slow := 1500 * time.Millisecond
+	f.ms.mu.Lock()
+	f.ms.slow = map[string]time.Duration{"fp-srv_a": slow}
+	f.ms.mu.Unlock()
+	f.clk.Add(lease.PreVoteFor + time.Second)
+	if err := g.l.Succeed(ask(f, 2)); err != nil {
+		t.Fatal(err)
+	}
+	began := time.Now()
+	done := make(chan struct{})
+	go func() { g.step(); close(done) }()
+	tallied := func() bool {
+		g.logMu.Lock()
+		defer g.logMu.Unlock()
+		return slices.ContainsFunc(g.logged, func(l string) bool { return strings.Contains(l, "would take it") })
+	}
+	for !tallied() && time.Since(began) < 5*time.Second {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if took := time.Since(began); took >= slow {
+		t.Fatalf("the pre-vote's tally came after %s, once the dead member's answer was waited out", took)
+	}
+	<-done
+	if !leadsNow(g) {
+		t.Fatal("the heir does not lead after its pre-vote and probe")
+	}
+}

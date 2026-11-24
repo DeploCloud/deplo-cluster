@@ -106,11 +106,21 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			}
 		}()
 	}
-	wg.Wait()
-	close(answered)
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
 	heard := map[string]int{}
-	for id := range answered {
-		heard[id]++
+	// A pre-vote takes nothing, so it is over once a quorum said yes: a dead member is not waited out.
+	for waiting := true; waiting; {
+		select {
+		case id := <-answered:
+			heard[id]++
+			waiting = !p.prevote || !l.everyQuorum(epochs, heard, now)
+		case <-finished:
+			for len(answered) > 0 {
+				heard[<-answered]++
+			}
+			waiting = false
+		}
 	}
 	sent := map[string]int{}
 	for _, j := range jobs {
@@ -127,7 +137,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 	for id, n := range heard {
 		c := l.clusters[id]
 		if c != nil && c.succeed && p.prevote {
-			l.once("tally "+id, "deplo-cluster: cluster %s: epoch %d: %d of %d members would take it, Deplo's word %t", id, c.epoch, n, c.voters(), now.Sub(c.deplo) < DeploFor)
+			l.once("tally "+id, "deplo-cluster: cluster %s: epoch %d: %d of %d members would take it, Deplo's word %t", id, c.epoch, n, c.voters(), now.Before(c.deploUntil))
 		}
 		if c == nil || c.superseded || c.epoch != epochs[id] || !c.quorum(n, now) {
 			continue
@@ -160,6 +170,18 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		tell()
 	}
 	return all
+}
+
+// everyQuorum says whether every cluster of a pass heard a quorum at its epoch.
+func (l *Leader) everyQuorum(epochs map[string]uint64, heard map[string]int, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id, epoch := range epochs {
+		if c := l.clusters[id]; c != nil && c.epoch == epoch && !c.quorum(heard[id], now) {
+			return false
+		}
+	}
+	return true
 }
 
 // keepWhereRunning places each single-writer workload on the member that runs it, the newest epoch first, before
