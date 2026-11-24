@@ -34,6 +34,19 @@ type Workload struct {
 	PeakMB  int      `json:"peakMb"`
 	// DiskBytes is what its data takes on a member that holds none of it yet; 0 is none, or unknown.
 	DiskBytes int64 `json:"diskBytes,omitempty"`
+	// DataUnknown is a new workload, whose data nobody can measure yet: it goes where it can grow.
+	DataUnknown bool `json:"dataUnknown,omitempty"`
+}
+
+// FullShare is the share of a disk past which a new workload goes elsewhere while another member has less used.
+const FullShare = 0.8
+
+// used is the share of m's disk in use; 0 when unknown.
+func used(m Member) float64 {
+	if m.DiskTotal <= 0 {
+		return 0
+	}
+	return 1 - float64(m.DiskFree)/float64(m.DiskTotal)
 }
 
 // Member is what the leader knows about one server of the cluster.
@@ -145,6 +158,9 @@ func Place(cluster string, w Workload, members []Member) Answer {
 	case len(fit) == 0:
 		return refuse(NoRoom)
 	}
+	if w.DataUnknown {
+		return Answer{Member: roomiest(w, fit).ID}
+	}
 	sort.SliceStable(fit, func(i, j int) bool {
 		a, b := fit[i], fit[j]
 		if da, db := slices.Contains(a.DatabaseEnvs, w.Environment), slices.Contains(b.DatabaseEnvs, w.Environment); da != db {
@@ -162,6 +178,29 @@ func Place(cluster string, w Workload, members []Member) Answer {
 		return a.ID < b.ID
 	})
 	return Answer{Member: fit[0].ID}
+}
+
+// roomiest is where a workload whose data is unknown can grow: never a member past FullShare while another is under
+// it, then no sibling, then the most free disk (deplo ADR-0043).
+func roomiest(w Workload, fit []Member) Member {
+	under := slices.DeleteFunc(slices.Clone(fit), func(m Member) bool { return used(m) > FullShare })
+	if len(under) > 0 {
+		fit = under
+	}
+	sort.SliceStable(fit, func(i, j int) bool {
+		a, b := fit[i], fit[j]
+		if sa, sb := slices.Contains(a.Placed, w.ID), slices.Contains(b.Placed, w.ID); sa != sb {
+			return !sa
+		}
+		if a.DiskFree != b.DiskFree {
+			return a.DiskFree > b.DiskFree
+		}
+		if a.FreeMB != b.FreeMB {
+			return a.FreeMB > b.FreeMB
+		}
+		return a.ID < b.ID
+	})
+	return fit[0]
 }
 
 // Spread places n replicas of w, each on a member running none of the others while one is left. A replica stays

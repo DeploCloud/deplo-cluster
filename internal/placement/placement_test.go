@@ -203,3 +203,31 @@ func TestAMemberWithoutRoomForTheDataIsNeverChosen(t *testing.T) {
 		t.Fatalf("an unknown disk: %+v", a)
 	}
 }
+
+// eu, 24 Nov 2026: two new lab Apps landed on the member at 80%, the one with the most memory, and grew there to 90%.
+func TestANewWorkloadGoesWhereItCanGrow(t *testing.T) {
+	w := web()
+	w.DataUnknown = true
+	full, roomy, roomiest := member("a", 8192, 0), member("b", 2048, 3), member("c", 1024, 5)
+	full.DiskFree, full.DiskTotal = 3<<29, 10<<30 // 85% used
+	roomy.DiskFree, roomy.DiskTotal = 5<<30, 10<<30
+	roomiest.DiskFree, roomiest.DiskTotal = 7<<30, 20<<30
+	if a := place(t, w, full, roomy, roomiest); a.Member != "c" {
+		t.Fatalf("placed on %q, not the most free disk", a.Member)
+	}
+	// Past 80% used, never while another member is under it, even with more free bytes.
+	big := member("d", 8192, 0)
+	big.DiskFree, big.DiskTotal = 9<<30, 50<<30
+	if a := place(t, w, big, roomy); a.Member != "b" {
+		t.Fatalf("placed on %q, a disk past 80%%", a.Member)
+	}
+	// Every member past 80%: still the most free disk.
+	if a := place(t, w, full, big); a.Member != "d" {
+		t.Fatalf("placed on %q", a.Member)
+	}
+	// Its data known, the usual rule: most free memory.
+	w.DataUnknown = false
+	if a := place(t, w, full, roomy, roomiest); a.Member != "a" {
+		t.Fatalf("placed on %q", a.Member)
+	}
+}
