@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 )
@@ -145,5 +147,47 @@ func TestTheIndexNamesTheBackupFromTheBundleItselfAndHoldsNoSecret(t *testing.T)
 	_ = s.Put("clu_1", "database", "db_1", "rev_2", seal(t, s.PublicKey(), b), claimed)
 	if m, _ := s.Meta("clu_1", "database", "db_1"); m.Restore != nil {
 		t.Fatalf("the index still names a backup: %+v", m.Restore)
+	}
+}
+
+// eu, 24 Nov 2026: a failover pass read a bundle's meta under the leader's lock while a Put waited on a busy disk. A
+// Put that hangs (a pipe nobody reads stands in for the disk) holds no Meta or Unseal up.
+func TestAPutThatHangsHoldsNoReadUp(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	if err := s.Put("clu_1", "app", "prj_1", "dep_1", seal(t, s.PublicKey(), sample("prj_1", "dep_1")), Meta{Environment: "env_1"}); err != nil {
+		t.Fatal(err)
+	}
+	hung, _ := s.path("clu_1", "app", "prj_2", ".age")
+	if err := os.MkdirAll(filepath.Dir(hung), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(hung+".tmp", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if r, err := os.OpenFile(hung+".tmp", os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+			time.Sleep(50 * time.Millisecond)
+			r.Close()
+		}
+	})
+	go func() {
+		_ = s.Put("clu_1", "app", "prj_2", "dep_1", seal(t, s.PublicKey(), sample("prj_2", "dep_1")), Meta{})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if m, err := s.Meta("clu_1", "app", "prj_1"); err != nil || m.Environment != "env_1" {
+			t.Errorf("meta %+v, %v", m, err)
+		}
+		if _, err := s.Unseal("clu_1", "app", "prj_1"); err != nil {
+			t.Errorf("unseal: %v", err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a read waited on a Put")
 	}
 }
