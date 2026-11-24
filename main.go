@@ -136,6 +136,7 @@ func runLeader(ctx context.Context, identity func() (*wire.Identity, error), dia
 		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		l.Drain(dctx)
+		l.Events().Flush()
 	}()
 	go l.Run(ctx)
 	if socket != "" {

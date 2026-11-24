@@ -143,7 +143,10 @@ type index struct {
 type Store struct {
 	dir string
 	id  *age.X25519Identity
-	mu  sync.Mutex
+	// mu orders writes. Reads take no lock and Meta reads memory: a failover pass asked under the leader's lock
+	// while a Put waited on a busy disk, and no renewal went out (eu, 24 Nov 2026).
+	mu    sync.Mutex
+	metas sync.Map
 }
 
 // Open reads the age identity from dir, making it on the first run. Only the public half is ever shown.
@@ -235,7 +238,11 @@ func (s *Store) Put(cluster, kind, id, deploymentID string, sealed []byte, meta 
 	if err := write(file, sealed); err != nil {
 		return err
 	}
-	return write(idx, raw)
+	if err := write(idx, raw); err != nil {
+		return err
+	}
+	s.metas.Store(idx, meta)
+	return nil
 }
 
 // PutBase64 is Put for the call's base64 payload.
@@ -265,6 +272,7 @@ func (s *Store) Drop(cluster, kind, id string) error {
 		if err != nil {
 			return err
 		}
+		s.metas.Delete(file)
 		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -279,7 +287,14 @@ func (s *Store) DropCluster(cluster string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return os.RemoveAll(filepath.Join(s.dir, "bundles", cluster))
+	dir := filepath.Join(s.dir, "bundles", cluster)
+	s.metas.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), dir+string(filepath.Separator)) {
+			s.metas.Delete(k)
+		}
+		return true
+	})
+	return os.RemoveAll(dir)
 }
 
 // List is every bundle held for the cluster, in a stable order.
@@ -315,8 +330,9 @@ func (s *Store) Meta(cluster, kind, id string) (Meta, error) {
 	if err != nil {
 		return Meta{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if m, ok := s.metas.Load(file); ok {
+		return m.(Meta), nil
+	}
 	raw, err := os.ReadFile(file)
 	if err != nil {
 		return Meta{}, ErrNone
@@ -325,7 +341,8 @@ func (s *Store) Meta(cluster, kind, id string) (Meta, error) {
 	if err := json.Unmarshal(raw, &ix); err != nil {
 		return Meta{}, ErrNone
 	}
-	return ix.Meta, nil
+	m, _ := s.metas.LoadOrStore(file, ix.Meta)
+	return m.(Meta), nil
 }
 
 // Unseal opens the workload's bundle in memory, to send one restart.
@@ -334,9 +351,7 @@ func (s *Store) Unseal(cluster, kind, id string) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, err
 	}
-	s.mu.Lock()
 	raw, err := os.ReadFile(file)
-	s.mu.Unlock()
 	if err != nil {
 		return Bundle{}, ErrNone
 	}

@@ -72,3 +72,39 @@ func TestAnOlderAgentsSilenceOnWhatItRunsIsSaidOnceNotEverySecond(t *testing.T) 
 		t.Fatalf("said %d times that srv_a does not say what it runs", n)
 	}
 }
+
+// eu, 24 Nov 2026: a member that answered late was said in the events file while the lab's disk was busy, the
+// append waited, and the leader renewed nobody for 7.8 s: every lease ran out. An events file that hangs holds no
+// renewal up.
+func TestAnEventsFileThatHangsHoldsNoRenewalUp(t *testing.T) {
+	f := startFO(t, abc())
+	f.pass(3 * time.Second)
+	f.l.Events().Flush()
+	file := filepath.Join(f.dir, "events.jsonl")
+	_ = os.Remove(file)
+	if err := syscall.Mkfifo(file, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if r, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+			time.Sleep(50 * time.Millisecond)
+			r.Close()
+		}
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// srv_c falls silent: its state changes are events, and srv_b is still renewed.
+		f.ms.cut["fp-srv_c"] = true
+		before := f.ms.renewedAt("fp-srv_b")
+		f.pass(10 * time.Second)
+		if !f.ms.renewedAt("fp-srv_b").After(before) {
+			t.Error("no renewal went out while an event was being written")
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the leader waits on the events file")
+	}
+}

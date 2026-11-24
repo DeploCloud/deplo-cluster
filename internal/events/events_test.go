@@ -1,7 +1,9 @@
 package events_test
 
 import (
+	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -31,6 +33,7 @@ func TestEventsSurviveARestartAndKeepCounting(t *testing.T) {
 	l := events.Open(file, 100, now)
 	l.Append("a", "c", nil)
 	l.Append("b", "c", nil)
+	l.Flush()
 	again := events.Open(file, 100, now)
 	if again.Head() != 2 {
 		t.Fatalf("head after restart %d", again.Head())
@@ -54,6 +57,7 @@ func TestPastTheCapTheOldestGoAndTheGapIsSaid(t *testing.T) {
 	if gap || len(got) != 1 {
 		t.Fatalf("a recent reader saw gap=%v, %d events", gap, len(got))
 	}
+	l.Flush()
 	if events.Open(file, 3, now).Head() != 10 {
 		t.Fatal("the compacted file lost the head")
 	}
@@ -84,5 +88,37 @@ func TestEventsAreTrimmedWithoutAFileToo(t *testing.T) {
 	got, gap := l.Since(0)
 	if len(got) > 6 || !gap || got[len(got)-1].Seq != 100 {
 		t.Fatalf("%d events kept (gap %v), want at most twice the cap and the newest", len(got), gap)
+	}
+}
+
+// eu, 24 Nov 2026: an append waited on a busy disk and the leader renewed nobody for 7.8 s. A file nobody can write
+// to (a pipe nobody reads) holds no append up.
+func TestAnAppendNeverWaitsOnTheDisk(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "events.jsonl")
+	l := events.Open(file, 100, now)
+	if err := syscall.Mkfifo(file, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if r, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+			time.Sleep(50 * time.Millisecond)
+			r.Close()
+		}
+	})
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ {
+			l.Append("member_state", "c", map[string]string{"member": "m"})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an append waited on the file")
+	}
+	if l.Head() != 100 {
+		t.Fatalf("head %d", l.Head())
 	}
 }
