@@ -102,10 +102,10 @@ func (l *Leader) keepsFor(clusterID, memberID string) []lease.Keep {
 	var out []lease.Keep
 	for _, h := range held {
 		k := lease.Keep{Slug: h.e.Slug, FailedOverAt: h.at.UTC().Format(time.RFC3339)}
-		b, err := l.cfg.Bundles.Unseal(clusterID, h.e.Kind, h.e.ID)
-		if err == nil && b.Keep != nil && len(b.Keep.Request) > 0 && h.e.Member != "" && h.e.Member != memberID {
-			k.Ref, k.StoreMember, k.Request = b.Keep.Ref, b.Keep.StoreMember, b.Keep.Request
-			k.StoreFingerprint = prints[b.Keep.StoreMember]
+		keep, err := l.cfg.Bundles.KeepOf(clusterID, h.e.Kind, h.e.ID)
+		if err == nil && keep != nil && len(keep.Request) > 0 && h.e.Member != "" && h.e.Member != memberID {
+			k.Ref, k.StoreMember, k.Request = keep.Ref, keep.StoreMember, keep.Request
+			k.StoreFingerprint = prints[keep.StoreMember]
 		} else if !h.kept {
 			continue
 		}
@@ -141,11 +141,11 @@ func (l *Leader) storesFor(clusterID, memberID string) []lease.Store {
 			if h.e.Member == "" || h.e.Member == s.id {
 				continue
 			}
-			b, err := l.cfg.Bundles.Unseal(clusterID, h.e.Kind, h.e.ID)
-			if err != nil || b.Keep == nil || b.Keep.StoreMember != memberID || b.Keep.StoreStem == "" {
+			keep, err := l.cfg.Bundles.KeepOf(clusterID, h.e.Kind, h.e.ID)
+			if err != nil || keep == nil || keep.StoreMember != memberID || keep.StoreStem == "" {
 				continue
 			}
-			out = append(out, lease.Store{From: s.print, Root: b.Keep.StoreRoot, ObjectKey: b.Keep.StoreStem + lease.LeftName(h.at, s.id, true)})
+			out = append(out, lease.Store{From: s.print, Root: keep.StoreRoot, ObjectKey: keep.StoreStem + lease.LeftName(h.at, s.id, true)})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].From+out[i].ObjectKey < out[j].From+out[j].ObjectKey })

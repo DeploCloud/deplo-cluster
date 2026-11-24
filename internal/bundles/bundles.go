@@ -147,6 +147,9 @@ type Store struct {
 	// while a Put waited on a busy disk, and no renewal went out (eu, 24 Nov 2026).
 	mu    sync.Mutex
 	metas sync.Map
+	// keeps is each bundle's Keep, read once: renewals ask it every second, and a read of the bundle on a busy disk
+	// held one member's renewals 14.7 s (eu, 24 Nov 2026). Put and Drop replace it.
+	keeps sync.Map
 }
 
 // Open reads the age identity from dir, making it on the first run. Only the public half is ever shown.
@@ -242,6 +245,7 @@ func (s *Store) Put(cluster, kind, id, deploymentID string, sealed []byte, meta 
 		return err
 	}
 	s.metas.Store(idx, meta)
+	s.keeps.Store(file, b.Keep)
 	return nil
 }
 
@@ -273,6 +277,7 @@ func (s *Store) Drop(cluster, kind, id string) error {
 			return err
 		}
 		s.metas.Delete(file)
+		s.keeps.Delete(file)
 		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -288,12 +293,14 @@ func (s *Store) DropCluster(cluster string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	dir := filepath.Join(s.dir, "bundles", cluster)
-	s.metas.Range(func(k, _ any) bool {
-		if strings.HasPrefix(k.(string), dir+string(filepath.Separator)) {
-			s.metas.Delete(k)
-		}
-		return true
-	})
+	for _, m := range []*sync.Map{&s.metas, &s.keeps} {
+		m.Range(func(k, _ any) bool {
+			if strings.HasPrefix(k.(string), dir+string(filepath.Separator)) {
+				m.Delete(k)
+			}
+			return true
+		})
+	}
 	return os.RemoveAll(dir)
 }
 
@@ -346,6 +353,23 @@ func (s *Store) Meta(cluster, kind, id string) (Meta, error) {
 }
 
 // Unseal opens the workload's bundle in memory, to send one restart.
+// KeepOf is the bundle's Keep, from memory once read: what a renewal carries never waits on the disk.
+func (s *Store) KeepOf(cluster, kind, id string) (*Keep, error) {
+	file, err := s.path(cluster, kind, id, ".age")
+	if err != nil {
+		return nil, err
+	}
+	if k, ok := s.keeps.Load(file); ok {
+		return k.(*Keep), nil
+	}
+	b, err := s.Unseal(cluster, kind, id)
+	if err != nil {
+		return nil, err
+	}
+	s.keeps.Store(file, b.Keep)
+	return b.Keep, nil
+}
+
 func (s *Store) Unseal(cluster, kind, id string) (Bundle, error) {
 	file, err := s.path(cluster, kind, id, ".age")
 	if err != nil {

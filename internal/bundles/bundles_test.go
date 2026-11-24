@@ -191,3 +191,54 @@ func TestAPutThatHangsHoldsNoReadUp(t *testing.T) {
 		t.Fatal("a read waited on a Put")
 	}
 }
+
+// eu, 24 Nov 2026: a renewal read a bundle for its Keep on a saturated disk and one member was not renewed for
+// 14.7 s. The Keep a renewal carries comes from memory once read, and follows every Put and Drop.
+func TestTheKeepARenewalCarriesNeverWaitsOnTheDisk(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir)
+	b := sample("prj_1", "dep_1")
+	b.Keep = &Keep{Ref: "dst_1", StoreMember: "srv_b"}
+	if err := s.Put("clu_1", "app", "prj_1", "dep_1", seal(t, s.PublicKey(), b), Meta{}); err != nil {
+		t.Fatal(err)
+	}
+	// A store started again reads it once from the disk.
+	s, _ = Open(dir)
+	if k, err := s.KeepOf("clu_1", "app", "prj_1"); err != nil || k == nil || k.Ref != "dst_1" {
+		t.Fatalf("keep %+v, %v", k, err)
+	}
+	// Then the disk hangs: a pipe nobody writes stands in for the bundle.
+	file, _ := s.path("clu_1", "app", "prj_1", ".age")
+	if os.Remove(file) != nil || syscall.Mkfifo(file, 0o600) != nil {
+		t.Fatal("fifo")
+	}
+	t.Cleanup(func() {
+		if w, err := os.OpenFile(file, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			w.Close()
+		}
+	})
+	done := make(chan *Keep, 1)
+	go func() { k, _ := s.KeepOf("clu_1", "app", "prj_1"); done <- k }()
+	select {
+	case k := <-done:
+		if k == nil || k.Ref != "dst_1" {
+			t.Fatalf("keep %+v", k)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the Keep waited on the disk")
+	}
+	os.Remove(file)
+	b.Keep, b.DeploymentID = &Keep{Ref: "dst_2", StoreMember: "srv_c"}, "dep_2"
+	if err := s.Put("clu_1", "app", "prj_1", "dep_2", seal(t, s.PublicKey(), b), Meta{}); err != nil {
+		t.Fatal(err)
+	}
+	if k, _ := s.KeepOf("clu_1", "app", "prj_1"); k == nil || k.Ref != "dst_2" {
+		t.Fatalf("after a Put: %+v", k)
+	}
+	if err := s.Drop("clu_1", "app", "prj_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.KeepOf("clu_1", "app", "prj_1"); err == nil {
+		t.Fatal("a dropped bundle still has a Keep")
+	}
+}
