@@ -18,7 +18,8 @@ type Event struct {
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
-// Log keeps the last `max` events in memory and in a file, so a restart keeps them.
+// Log keeps the last `max` events in memory and in a file, so a restart keeps them. The file is written off the
+// caller's path: on eu (24 Nov 2026) an append waited on a busy disk and the leader renewed nobody for 7.8 s.
 type Log struct {
 	mu     sync.Mutex
 	file   string
@@ -27,14 +28,24 @@ type Log struct {
 	seq    uint64
 	wake   chan struct{}
 	now    func() time.Time
+	// pending is what the writer has not put in the file yet; rewrite says the file is rewritten whole instead.
+	pending []Event
+	rewrite bool
+	kick    chan struct{}
+	wmu     sync.Mutex
 }
 
 // Open reads the file (an empty path keeps events in memory only).
 func Open(file string, max int, now func() time.Time) *Log {
-	l := &Log{file: file, max: max, wake: make(chan struct{}), now: now}
+	l := &Log{file: file, max: max, wake: make(chan struct{}), now: now, kick: make(chan struct{}, 1)}
 	if file == "" {
 		return l
 	}
+	go func() {
+		for range l.kick {
+			l.Flush()
+		}
+	}()
 	f, err := os.Open(file)
 	if err != nil {
 		return l
@@ -66,20 +77,39 @@ func (l *Log) Append(typ, cluster string, data any) Event {
 		l.events = append([]Event(nil), l.events[len(l.events)-l.max:]...)
 	}
 	if l.file != "" {
-		l.persist(e, trimmed)
+		l.pending, l.rewrite = append(l.pending, e), l.rewrite || trimmed
+		select {
+		case l.kick <- struct{}{}:
+		default:
+		}
 	}
 	close(l.wake)
 	l.wake = make(chan struct{})
 	return e
 }
 
-// persist appends the line, or rewrites the file when the events were just trimmed.
-func (l *Log) persist(e Event, trimmed bool) {
-	if trimmed {
+// Flush puts every event appended so far in the file: their lines appended, or the file rewritten once trimmed.
+func (l *Log) Flush() {
+	if l.file == "" {
+		return
+	}
+	l.wmu.Lock()
+	defer l.wmu.Unlock()
+	l.mu.Lock()
+	pending, rewrite := l.pending, l.rewrite
+	if rewrite {
+		pending = append([]Event(nil), l.events...)
+	}
+	l.pending, l.rewrite = nil, false
+	l.mu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	if rewrite {
 		tmp := l.file + ".tmp"
 		if f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
 			enc := json.NewEncoder(f)
-			for _, ev := range l.events {
+			for _, ev := range pending {
 				_ = enc.Encode(ev)
 			}
 			f.Close()
@@ -92,7 +122,10 @@ func (l *Log) persist(e Event, trimmed bool) {
 		return
 	}
 	defer f.Close()
-	_ = json.NewEncoder(f).Encode(e)
+	enc := json.NewEncoder(f)
+	for _, ev := range pending {
+		_ = enc.Encode(ev)
+	}
 }
 
 // Head is the sequence of the newest event, 0 when there is none.
