@@ -18,7 +18,8 @@ const (
 	// an older agent's fence, and what any member is held to until it says StoppedWithin.
 	FenceAfter = 60 * time.Second
 	// FenceFor is how long this leader's member lives without a renewal: every renewal says so (Order.FenceSeconds).
-	FenceFor = 5 * time.Second
+	// Past the second heir's takeover (PreVoteFor + SucceedStagger), so losing the leader fences no member.
+	FenceFor = 20 * time.Second
 	// MaxLine bounds one order or reply; a start order carries a stack and its variables.
 	MaxLine = 16 << 20
 	// StartTimeout is how long a member may take to bring a moved workload up.
