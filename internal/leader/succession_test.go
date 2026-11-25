@@ -420,3 +420,35 @@ func TestAPreVoteIsOverOnceAQuorumSaidYes(t *testing.T) {
 		t.Fatal("the heir does not lead after its pre-vote and probe")
 	}
 }
+
+// The leader's server stops: the heir leads and renews every member left well before the lease the dead leader gave
+// it runs out, so no member on a healthy server fences (c41: each fenced at 5 s, the heir led at 10.6 s).
+func TestTheHeirRenewsEveryMemberBeforeItsLeaseRunsOut(t *testing.T) {
+	f := lined(t)
+	for _, fp := range []string{"fp-srv_a", "fp-srv_b", "fp-srv_c"} {
+		f.ms.shortFence[fp] = true
+	}
+	f.pass(2 * time.Second)
+	g := heir(t, f)
+	f.ms.cut["fp-srv_a"] = true
+	g.blind["srv_a"] = true
+	ends := map[string]time.Time{"fp-srv_b": f.ms.leaseEnd("fp-srv_b"), "fp-srv_c": f.ms.leaseEnd("fp-srv_c")}
+	// The heir's agent asks once its own lease went unrenewed for PreVoteFor; a busy member may need one more try.
+	f.clk.Add(lease.PreVoteFor + 2*lease.RenewEvery)
+	if err := g.l.Succeed(ask(f, 2)); err != nil {
+		t.Fatal(err)
+	}
+	g.step()
+	for fp, end := range ends {
+		if o := f.lastOrder(fp); o.From != "srv_b" {
+			t.Fatalf("%s was not renewed by the heir: last order from %q", fp, o.From)
+		}
+		if left := end.Sub(f.clk.Now()); left < 5*time.Second {
+			t.Fatalf("%s was renewed %v before the dead leader's lease ran out, want at least 5 s", fp, left)
+		}
+	}
+	// The second in line asks one stagger later, and still renews before the lease runs out.
+	if second := lease.PreVoteFor + lease.SucceedStagger + 2*lease.RenewEvery; second >= lease.FenceFor {
+		t.Fatalf("the second heir renews %v after the last renewal, past the %v lease", second, lease.FenceFor)
+	}
+}
