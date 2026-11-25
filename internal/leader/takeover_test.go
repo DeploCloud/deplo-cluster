@@ -201,7 +201,7 @@ func shortFences(r leader.Roster) leader.Roster {
 }
 
 // The member is really gone, and the one that answers says no lease can live on an extension: its database
-// moves once the plain 5 s lease and the time to stop are over, not after five minutes.
+// moves once the plain lease and the time to stop are over, not after five minutes.
 func TestATakeoverMovesADeadMembersDatabaseOnceAMemberVouchesNoLeaseWasExtended(t *testing.T) {
 	f := two(t)
 	newer(f)
@@ -211,13 +211,13 @@ func TestATakeoverMovesADeadMembersDatabaseOnceAMemberVouchesNoLeaseWasExtended(
 	g := takeOverWith(t, f, shortFences(snapshotRoster(f, f.l.Snapshot().Clusters["clu_1"].Epoch+1)))
 	g.putDB(t, "db_1", "db-main", backup(""))
 
-	g.pass(20 * time.Second)
+	g.pass(lease.FenceFor + 15*time.Second)
 	if placed(g, "prj_1") != "srv_b" || placed(g, "db_1") != "srv_a" {
-		t.Fatalf("after 20 s: web on %q, the database on %q", placed(g, "prj_1"), placed(g, "db_1"))
+		t.Fatalf("15 s past the lease: web on %q, the database on %q", placed(g, "prj_1"), placed(g, "db_1"))
 	}
 	g.pass(10 * time.Second)
 	if placed(g, "db_1") != "srv_b" {
-		t.Fatalf("after 30 s the database is still on %q", placed(g, "db_1"))
+		t.Fatalf("25 s past the lease the database is still on %q", placed(g, "db_1"))
 	}
 }
 
@@ -350,7 +350,7 @@ func TestATakeoverKeepsTheRosterForAMemberTooOldToSayWhatItRuns(t *testing.T) {
 }
 
 // An agent Deplo knows kills its stacks all at once (QuickStop) is surely stopped 13 s after its lease ran out,
-// not 21: the dead member's database moves 8 s sooner, never before the 5 s lease and those 13 s are over.
+// not 21: the dead member's database moves 8 s sooner, never before the lease and those 13 s are over.
 func TestATakeoverMovesAQuickStoppingMembersDatabaseSooner(t *testing.T) {
 	f := two(t)
 	newer(f)
@@ -364,12 +364,12 @@ func TestATakeoverMovesAQuickStoppingMembersDatabaseSooner(t *testing.T) {
 	g := takeOverWith(t, f, r)
 	g.putDB(t, "db_1", "db-main", backup(""))
 
-	g.pass(15 * time.Second)
+	g.pass(lease.FenceFor + 10*time.Second)
 	if placed(g, "db_1") != "srv_a" {
-		t.Fatalf("after 15 s the database moved to %q, before its member's lease and stop were over", placed(g, "db_1"))
+		t.Fatalf("10 s past the lease the database moved to %q, before its member's lease and stop were over", placed(g, "db_1"))
 	}
 	g.pass(5 * time.Second)
 	if placed(g, "db_1") != "srv_b" {
-		t.Fatalf("after 20 s the database is still on %q", placed(g, "db_1"))
+		t.Fatalf("15 s past the lease the database is still on %q", placed(g, "db_1"))
 	}
 }

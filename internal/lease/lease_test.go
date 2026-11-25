@@ -3,6 +3,7 @@ package lease_test
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -97,7 +98,7 @@ func TestARenewalSaysHowLongItsLeaseLivesAndAProbeDoesNot(t *testing.T) {
 		if err != nil || r.StoppedWithin != 21 {
 			t.Fatalf("reply %+v (%v)", r, err)
 		}
-		if line := <-got; strings.Contains(line, `"fenceSeconds":5`) == probe {
+		if line := <-got; strings.Contains(line, fmt.Sprintf(`"fenceSeconds":%d`, int(lease.FenceFor/time.Second))) == probe {
 			t.Fatalf("probe %v sent %s", probe, line)
 		}
 	}
