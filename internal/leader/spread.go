@@ -64,6 +64,7 @@ func (l *Leader) follow(clusterID string, e lease.Entry, from string) {
 	if p, ok := c.place(e.Kind, e.ID, e.Replica, e.Member); ok {
 		e = p
 	} else {
+		e.Epoch = c.epoch
 		c.placement = append(c.placement, e)
 	}
 	key := entryKey(e.Kind, e.ID, e.Replica)

@@ -154,8 +154,8 @@ type cluster struct {
 	heard int
 	// deploUntil is how long the control plane's last word for this epoch holds here.
 	deploUntil time.Time
-	// starting is the workloads a start order is out for, until it has an outcome.
-	starting map[string]bool
+	// starting is the workloads a start order is out for, until it has an outcome: see told.
+	starting map[string]underWay
 	// gone is the members silent past GoneAfter that no longer count for a majority, and since when (ADR-0049).
 	gone map[string]time.Time
 	// succeed is an epoch this leader took without Deplo's word: it pre-votes before it probes (prevoted), until a
@@ -259,6 +259,8 @@ type Leader struct {
 	// said is the last line logged on each subject that a pass every second would repeat: see once.
 	saidMu sync.Mutex
 	said   map[string]string
+	// kick has Run renew now: a leader handed a cluster at a newer epoch probes at once, not at its next tick.
+	kick chan struct{}
 }
 
 // once logs a line a pass every second would repeat only when it differs from the last one on that subject.
@@ -296,7 +298,7 @@ func New(cfg Config) *Leader {
 		_ = os.MkdirAll(cfg.StateDir, 0o700)
 		file = filepath.Join(cfg.StateDir, "events.jsonl")
 	}
-	l := &Leader{cfg: cfg, log: events.Open(file, MaxEvents, cfg.Now), clusters: map[string]*cluster{}, epochs: map[string]uint64{}, started: cfg.Now(), standby: map[string]Roster{}}
+	l := &Leader{cfg: cfg, log: events.Open(file, MaxEvents, cfg.Now), clusters: map[string]*cluster{}, epochs: map[string]uint64{}, started: cfg.Now(), standby: map[string]Roster{}, kick: make(chan struct{}, 1)}
 	if cfg.StateDir != "" {
 		l.files = statefile.NewWriter(cfg.StateDir, cfg.Logf)
 		raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "epochs.json"))
@@ -308,9 +310,11 @@ func New(cfg Config) *Leader {
 		if err != nil && !os.IsNotExist(err) {
 			l.epochs = map[string]uint64{}
 			cfg.Logf("deplo-cluster: epochs.json cannot be read (%v): serving no cluster until Deplo sends its roster", err)
+			l.forgetRestored()
 			return l
 		}
 		l.loadRosters()
+		l.forgetRestored()
 		l.loadStandby()
 	}
 	return l
@@ -434,7 +438,10 @@ func (l *Leader) SetRoster(r Roster) error {
 			delete(c.kept, id)
 		}
 	}
-	c.members, c.placement = next, l.reconcilePlacement(c, r.Placement)
+	var kept []lease.Entry
+	takeover := again || c.epoch == 0
+	c.placement, kept = l.reconcilePlacement(c, r.Placement, takeover)
+	c.members = next
 	c.standbys = c.keptStandbys(r.Standbys)
 	if again || c.epoch == 0 {
 		l.adoptWaiting(c, now)
@@ -460,8 +467,16 @@ func (l *Leader) SetRoster(r Roster) error {
 		l.mu.Lock()
 		if c.epoch == r.Epoch {
 			c.since = ev.Seq
+			l.saveFailover()
 		}
 		l.mu.Unlock()
+	}
+	l.tellKept(r.Cluster, kept)
+	if takeover {
+		select {
+		case l.kick <- struct{}{}:
+		default:
+		}
 	}
 	return nil
 }
@@ -516,8 +531,14 @@ func (b Beat) Trust() time.Duration {
 }
 
 // Beat notes the control plane's word for the clusters led here at that epoch. A newer epoch means another
-// leader was handed the cluster: this one stops, and leads again only from a roster at least that new.
+// leader was handed the cluster: this one renews its members one last time and stops, so the next one, handed the
+// cluster after this answer, renews them within a second of it (c43: 1.49 s). It leads again only from a newer roster.
 func (l *Leader) Beat(b Beat) BeatReply {
+	if last := l.handing(b); len(last) > 0 {
+		l.tickMu.Lock()
+		defer l.tickMu.Unlock()
+		l.exchange(context.Background(), pass{only: last})
+	}
 	now := l.cfg.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -539,6 +560,20 @@ func (l *Leader) Beat(b Beat) BeatReply {
 		}
 	}
 	return BeatReply{OK: true, HoldsMs: held.Milliseconds()}
+}
+
+// handing is the clusters a beat hands to another leader that this one still leads.
+func (l *Leader) handing(b Beat) map[string]bool {
+	now := l.cfg.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := map[string]bool{}
+	for id, epoch := range b.Epochs {
+		if c := l.clusters[id]; c != nil && epoch > c.epoch && !c.superseded && c.leads(now) {
+			out[id] = true
+		}
+	}
+	return out
 }
 
 // Assign records where the leader put one workload and tells the control plane.
@@ -572,7 +607,7 @@ func (l *Leader) Assign(a Assign) error {
 		}
 	}
 	for i, m := range a.Members {
-		kept = append(kept, lease.Entry{Kind: a.Kind, ID: a.ID, Replica: i, Member: m, Slug: a.Slug, SingleWriter: a.SingleWriter, Balanced: a.Balanced})
+		kept = append(kept, lease.Entry{Kind: a.Kind, ID: a.ID, Replica: i, Member: m, Slug: a.Slug, SingleWriter: a.SingleWriter, Balanced: a.Balanced, Epoch: c.epoch})
 	}
 	c.placement = kept
 	epoch := c.epoch
@@ -587,12 +622,12 @@ func (l *Leader) tellPlacement(clusterID, kind, id string, members []string, epo
 	return l.log.Append("placement", clusterID, map[string]any{"kind": kind, "workloadId": id, "members": members, "epoch": epoch})
 }
 
-// place records which member runs one replica and returns its entry as it stands now; false when the placement
-// does not hold that replica. The caller holds l.mu.
+// place records which member runs one replica, decided at this epoch, and returns its entry as it stands now; false
+// when the placement does not hold that replica. The caller holds l.mu.
 func (c *cluster) place(kind, id string, replica int, member string) (lease.Entry, bool) {
 	for i := range c.placement {
 		if p := &c.placement[i]; p.Kind == kind && p.ID == id && p.Replica == replica {
-			p.Member = member
+			p.Member, p.Epoch = member, c.epoch
 			return *p, true
 		}
 	}

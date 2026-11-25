@@ -80,7 +80,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			}
 			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe, PreVote: p.prevote, From: c.roster.Self, Succeed: c.succeed}
 			if !probe && !p.prevote {
-				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told()), c.owesReturn(m.ID), int(extend/time.Second)
+				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told(m.ID)), c.owesReturn(m.ID), int(extend/time.Second)
 				o.Line, o.Last, o.Heard, o.NoExtension = line, c.lineEnd(), c.heardAgo(now), noExtension
 			}
 			if p.announce {
@@ -253,7 +253,7 @@ func (l *Leader) keepWhereRunning(clusterID string, c *cluster) []func() {
 		}
 		slices.Sort(on)
 		from := e.Member
-		c.placement[i].Member = on[0]
+		c.placement[i].Member, c.placement[i].Epoch = on[0], c.epoch
 		e = c.placement[i]
 		key := entryKey(e.Kind, e.ID, e.Replica)
 		c.auth[key] = authority{At: l.cfg.Now(), Entry: e, Told: Told{From: from, Reason: RunsThere}}
@@ -475,6 +475,7 @@ func (l *Leader) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-l.kick:
 		}
 	}
 }
