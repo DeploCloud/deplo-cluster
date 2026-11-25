@@ -79,7 +79,7 @@ func (c *cluster) copyFor(w [2]string, now time.Time) (lease.Entry, []string) {
 		if e.Kind != w[0] || e.ID != w[1] {
 			continue
 		}
-		if e.Member == "" || c.starting[entryKey(e.Kind, e.ID, e.Replica)] || c.waiting[entryKey(e.Kind, e.ID, e.Replica)] != nil {
+		if e.Member == "" || c.isStarting(entryKey(e.Kind, e.ID, e.Replica)) || c.waiting[entryKey(e.Kind, e.ID, e.Replica)] != nil {
 			return lease.Entry{}, nil
 		}
 		count[e.Member]++
@@ -156,7 +156,7 @@ func (l *Leader) copyBack(ctx context.Context, g copyGift) {
 	order := lease.Order{Cluster: g.cluster, Member: to, Epoch: c.epoch, Placement: c.orderPlacement(next), Start: l.startOrder(b), Return: c.returning[to]}
 	order.Start.ComposeYAML = strings.ReplaceAll(order.Start.ComposeYAML, b.Stack.Scale, strconv.Itoa(countOn(next, e.Kind, e.ID, to)))
 	key := entryKey(e.Kind, e.ID, e.Replica)
-	c.starting[key] = true
+	c.starting[key] = underWay{}
 	fp, epoch := c.members[to].Fingerprint, c.epoch
 	l.mu.Unlock()
 

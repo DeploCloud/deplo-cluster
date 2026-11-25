@@ -186,6 +186,7 @@ func (l *Leader) standDown(now time.Time) {
 			l.cfg.Logf("deplo-cluster: cluster %s: no quorum took epoch %d: standing by", id, c.epoch)
 			delete(l.clusters, id)
 			l.saveRosters()
+			l.saveFailover()
 		}
 	}
 }

@@ -112,7 +112,7 @@ func (l *Leader) promote(ctx context.Context, clusterID, kind, id string, replic
 	order := lease.Order{Cluster: clusterID, Member: to, Epoch: c.epoch, Placement: c.orderPlacement(next), Start: start, Return: c.returning[to]}
 	fp := c.members[to].Fingerprint
 	key := entryKey(kind, id, replica)
-	c.starting[key] = true
+	c.starting[key] = underWay{to: to, from: from}
 	check := c.found(auto, kind, id, replica, from)
 	l.mu.Unlock()
 

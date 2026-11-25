@@ -216,7 +216,7 @@ func (l *Leader) relocate(ctx context.Context, clusterID, kind, id string, repli
 		}
 		fp := target.Fingerprint
 		key := entryKey(kind, id, replica)
-		c.starting[key] = true
+		c.starting[key] = underWay{to: ans.Member, from: from}
 		check := c.found(asked == nil, kind, id, replica, from)
 		l.mu.Unlock()
 		// Deplo shows the workload moving from here until its new member answers (ADR-0049).
@@ -298,13 +298,25 @@ func (l *Leader) endStart(clusterID, key string) {
 	}
 }
 
-// told is the placement a renewal carries: a workload whose start is under way is shown as placed nowhere, so
-// the member it left neither runs it again nor removes it before the start has an outcome. The caller holds l.mu.
-func (c *cluster) told() []lease.Entry {
+// underWay is a start order out: the member it brings the workload up on, and the one it leaves.
+type underWay struct{ to, from string }
+
+func (c *cluster) isStarting(key string) bool {
+	_, ok := c.starting[key]
+	return ok
+}
+
+// told is the placement a renewal to a member carries: a workload whose start is under way is placed where it starts,
+// so the others pass visitors there once it answers, and nowhere for the member it leaves, which neither runs it
+// again nor removes it before the start has an outcome. The caller holds l.mu.
+func (c *cluster) told(member string) []lease.Entry {
 	out := append([]lease.Entry(nil), c.placement...)
 	for i, e := range out {
-		if c.starting[entryKey(e.Kind, e.ID, e.Replica)] {
-			out[i].Member = ""
+		if s, ok := c.starting[entryKey(e.Kind, e.ID, e.Replica)]; ok {
+			out[i].Member = s.to
+			if member == s.from {
+				out[i].Member = ""
+			}
 		}
 	}
 	return out
@@ -343,6 +355,7 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 	if stale != "" && !e.SingleWriter {
 		return l.drop(c, clusterID, e, from, stale)
 	}
+	e.Epoch = c.epoch
 	if _, ok := c.place(e.Kind, e.ID, e.Replica, e.Member); !ok {
 		c.placement = append(c.placement, e)
 	}

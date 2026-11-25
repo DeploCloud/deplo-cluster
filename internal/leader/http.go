@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/DeploCloud/deplo-cluster/internal/events"
 )
 
 // watchPing keeps an idle watch from looking dead to the agent that forwards it.
@@ -136,11 +138,11 @@ func (l *Leader) watch(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	wake := l.log.Wait()
 	head := l.log.Head()
-	pending, gap := l.log.Since(since)
+	read, gap := l.log.Since(since)
 	_ = enc.Encode(map[string]any{"hello": true, "head": head, "gap": gap})
 	fl.Flush()
 	for {
-		for _, e := range pending {
+		for _, e := range l.current(read) {
 			if enc.Encode(e) != nil {
 				return
 			}
@@ -158,6 +160,21 @@ func (l *Leader) watch(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 		}
 		wake = l.log.Wait()
-		pending, _ = l.log.Since(since)
+		read, _ = l.log.Since(since)
 	}
+}
+
+// current keeps only the place in the sequence of a cluster's events from before its epoch began here: a watch that
+// starts over from zero must not read an older epoch's placements back into Deplo's picture (c43).
+func (l *Leader) current(evs []events.Event) []events.Event {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]events.Event, len(evs))
+	for i, e := range evs {
+		if c := l.clusters[e.Cluster]; c != nil && e.Seq < c.since {
+			e = events.Event{Seq: e.Seq, At: e.At, Type: "past"}
+		}
+		out[i] = e
+	}
+	return out
 }
