@@ -307,14 +307,14 @@ func (c *cluster) isStarting(key string) bool {
 }
 
 // told is the placement a renewal to a member carries: a workload whose start is under way is placed where it starts,
-// so the others pass visitors there once it answers, and nowhere for the member it leaves, which neither runs it
-// again nor removes it before the start has an outcome. The caller holds l.mu.
+// so the others pass visitors there once it answers, and nowhere for the two members the start is about: its start
+// order alone brings it up, and the one it leaves neither runs it again nor removes it. The caller holds l.mu.
 func (c *cluster) told(member string) []lease.Entry {
 	out := append([]lease.Entry(nil), c.placement...)
 	for i, e := range out {
 		if s, ok := c.starting[entryKey(e.Kind, e.ID, e.Replica)]; ok {
 			out[i].Member = s.to
-			if member == s.from {
+			if member == s.from || member == s.to {
 				out[i].Member = ""
 			}
 		}

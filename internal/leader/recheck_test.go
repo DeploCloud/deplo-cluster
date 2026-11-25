@@ -111,7 +111,7 @@ func TestAStartUnderWayIsShownWhereItStartsToTheOthers(t *testing.T) {
 	f := threeRoomy(t)
 	f.putDB(t, "db_1", "db-main", backup(""))
 	f.ms.cut["fp-srv_a"] = true
-	told, other := "?", ""
+	told, itself, other := "?", "?", ""
 	to := f.startsOnce(func(fp string, o lease.Order) {
 		other = map[string]string{"fp-srv_b": "fp-srv_c", "fp-srv_c": "fp-srv_b"}[fp]
 		f.l.Tick(context.Background())
@@ -120,10 +120,19 @@ func TestAStartUnderWayIsShownWhereItStartsToTheOthers(t *testing.T) {
 				told = e.Member
 			}
 		}
+		for _, e := range f.lastOrder(fp).Placement {
+			if e.ID == "db_1" {
+				itself = e.Member
+			}
+		}
 	})
 	f.pass(90 * time.Second)
 	if *to == "" || "fp-"+told != *to {
 		t.Fatalf("mid-start %s was told the database is on %q, the start went to %s", other, told, *to)
+	}
+	// A renewal that beat the start order there would have it start a copy it still holds.
+	if itself != "" {
+		t.Fatalf("mid-start the member it starts on was told the database is on %q, not only by its start order", itself)
 	}
 }
 
