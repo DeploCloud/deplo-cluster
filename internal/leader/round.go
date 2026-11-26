@@ -16,24 +16,37 @@ func (l *Leader) Tick(ctx context.Context) { l.tick(ctx, time.Time{}) }
 
 // tick is Tick, sending a renewal that reached no member again until again: see renewAgain.
 func (l *Leader) tick(ctx context.Context, again time.Time) {
+	asked := time.Now()
 	l.tickMu.Lock()
 	defer l.tickMu.Unlock()
 	// Told to stop: the drain's longer lease is the last order, and a dial does not look at a cancelled context.
 	if ctx.Err() != nil {
 		return
 	}
-	l.round(ctx, again)
+	l.round(ctx, again, asked)
 	l.settle()
 }
 
 // round asks the members of every cluster this leader is not sure it leads, then sends its orders where a
 // quorum answered. The caller holds l.tickMu.
-func (l *Leader) round(ctx context.Context, again time.Time) {
+func (l *Leader) round(ctx context.Context, again, asked time.Time) {
 	l.standDown(l.cfg.Now())
+	began := time.Now()
 	l.exchange(ctx, pass{prevote: true})
+	voted := time.Now()
 	l.exchange(ctx, pass{probe: true})
+	probed := time.Now()
 	l.exchange(ctx, pass{again: again})
+	// c48: every member's renewals 2 to 3 s apart, and nothing in the journal said why.
+	if took := time.Since(asked); took >= slowRound {
+		l.rarely("round", "deplo-cluster: a round took %d ms: %d waiting for its turn, pre-vote %d, probe %d, renewals %d",
+			took.Milliseconds(), began.Sub(asked).Milliseconds(), voted.Sub(began).Milliseconds(),
+			probed.Sub(voted).Milliseconds(), time.Since(probed).Milliseconds())
+	}
 }
+
+// slowRound is a round that leaves the next renewal at risk of coming a whole tick late.
+const slowRound = 900 * time.Millisecond
 
 // pass is one exchange: a probe, a renewal that may announce an extension, or one that extends, to only some clusters.
 // With again set, a plain renewal that reached no member is sent again until then.
@@ -331,16 +344,32 @@ func (l *Leader) renewAgain(ctx context.Context, clusterID string, m *member, ep
 	}
 }
 
+// dialWithin ends a dial that reaches nothing before the tick two after its own, which would skip the member while it
+// lasts: a renewal sent while a member's agent was down left it 4 s without one (c48).
+const dialWithin = 2*lease.RenewEvery - 100*time.Millisecond
+
+// slowSend is a member reached, or answering, slowly enough to say so.
+const slowSend = 500 * time.Millisecond
+
 // renew sends one order and says whether the member took it at this leader's epoch, and whether it answered at all.
 func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m *member, o lease.Order) (took, reached bool) {
 	end, bounded := ctx.Deadline()
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
-	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
+	began := time.Now()
+	dctx, dcancel := context.WithTimeout(ctx, dialWithin)
+	c, err := l.cfg.Dial(dctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
+	dcancel()
 	if err != nil {
 		return false, false
 	}
 	defer c.Close()
+	dialed := time.Now()
+	defer func() {
+		if d, a := dialed.Sub(began), time.Since(dialed); d >= slowSend || a >= slowSend {
+			l.rarely("slow "+id, "deplo-cluster: member %s took %d ms to reach and %d ms to answer", id, d.Milliseconds(), a.Milliseconds())
+		}
+	}()
 	dl := time.Now().Add(sendTimeout)
 	if bounded && end.Before(dl) {
 		dl = end

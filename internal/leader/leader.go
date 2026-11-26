@@ -259,6 +259,7 @@ type Leader struct {
 	// said is the last line logged on each subject that a pass every second would repeat: see once.
 	saidMu sync.Mutex
 	said   map[string]string
+	saidAt map[string]time.Time
 	// kick has Run renew now: a leader handed a cluster at a newer epoch probes at once, not at its next tick.
 	kick chan struct{}
 	// exchanges counts the passes begun: a renewal sent again belongs to its pass, and the next one ends it.
@@ -282,6 +283,25 @@ func (l *Leader) once(subject, format string, args ...any) {
 		l.cfg.Logf("%s", line)
 	}
 }
+
+// rarely logs a line on subject at most once every rarelyEvery: a slow round can come every second.
+func (l *Leader) rarely(subject, format string, args ...any) {
+	now := time.Now()
+	l.saidMu.Lock()
+	if l.saidAt == nil {
+		l.saidAt = map[string]time.Time{}
+	}
+	quiet := now.Sub(l.saidAt[subject]) < rarelyEvery
+	if !quiet {
+		l.saidAt[subject] = now
+	}
+	l.saidMu.Unlock()
+	if !quiet {
+		l.cfg.Logf(format, args...)
+	}
+}
+
+const rarelyEvery = 10 * time.Second
 
 // unsay forgets a subject's line: what it said is over, and the next one is news.
 func (l *Leader) unsay(subject string) {

@@ -38,8 +38,10 @@ type members struct {
 	// running is what a member answers a probe with: the writers it runs and the epoch that placed them.
 	running map[string][]lease.Writer
 	// old are members whose agent is too old to say what it runs.
-	old    map[string]bool
-	cut    map[string]bool
+	old map[string]bool
+	cut map[string]bool
+	// hang holds a dial until the member is back or the dial gives up, as one does to an agent that is down.
+	hang   map[string]bool
 	orders map[string][]lease.Order
 	// starts are the start orders each member was given; refuse makes a member fail them.
 	starts map[string][]lease.Order
@@ -104,7 +106,7 @@ func laterOf(a, b time.Time) time.Time {
 func newMembers() *members {
 	return &members{epoch: map[string]uint64{}, running: map[string][]lease.Writer{}, old: map[string]bool{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, stoppedWithin: map[string]int{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{},
 		witness: map[string]bool{}, shortFence: map[string]bool{}, announced: map[string]time.Time{}, unannounced: map[string]time.Time{}, fence: map[string]int{}, from: map[string]string{}, prevotes: map[string]int{},
-		fails: map[string]int{}, tried: map[string][]time.Time{}}
+		fails: map[string]int{}, tried: map[string][]time.Time{}, hang: map[string]bool{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -113,8 +115,19 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 		left = time.Until(d)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.tried[to.Fingerprint] = append(m.tried[to.Fingerprint], time.Now())
+	for m.hang[to.Fingerprint] {
+		m.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			// It notices a moment late, as the door's dial does.
+			time.Sleep(20 * time.Millisecond)
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+		m.mu.Lock()
+	}
+	defer m.mu.Unlock()
 	if m.cut[to.Fingerprint] {
 		return nil, errors.New("no relay reaches that party")
 	}
