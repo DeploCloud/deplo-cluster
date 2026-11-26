@@ -301,6 +301,22 @@ func (l *Leader) endStart(clusterID, key string) {
 // underWay is a start order out: the member it brings the workload up on, and the one it leaves.
 type underWay struct{ to, from string }
 
+// arrival is a failover's start that is over: see memberFacts.
+type arrival struct {
+	underWay
+	at time.Time
+}
+
+// noteFailedOver keeps where a failover started a workload, for GoneAfter. The caller holds l.mu.
+func (c *cluster) noteFailedOver(key, from, to string, at time.Time) {
+	for k, a := range c.failedOver {
+		if at.Sub(a.at) >= GoneAfter {
+			delete(c.failedOver, k)
+		}
+	}
+	c.failedOver[key] = arrival{underWay{to: to, from: from}, at}
+}
+
 func (c *cluster) isStarting(key string) bool {
 	_, ok := c.starting[key]
 	return ok
@@ -383,6 +399,9 @@ func (l *Leader) commit(clusterID string, e lease.Entry, needMB int, from string
 	c.auth[key] = a
 	delete(c.waiting, key)
 	c.noteLeft(from, e, a.At)
+	if check != nil {
+		c.noteFailedOver(key, from, e.Member, a.At)
+	}
 	c.standbys = c.keptStandbys(c.standbys)
 	members := replicaMembers(c.placement, e.Kind, e.ID)
 	l.saveFailover()

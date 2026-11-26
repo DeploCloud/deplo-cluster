@@ -92,6 +92,13 @@ func (c *cluster) memberFacts(now time.Time) []placement.Member {
 	for _, s := range c.starting {
 		starting[s.to]++
 	}
+	// A dead member's Apps go in two passes: the first pass's starts still count in the second.
+	for key, a := range c.failedOver {
+		m := c.members[a.from]
+		if _, out := c.starting[key]; !out && m != nil && now.Sub(m.lastAck) >= lease.NotRespondingAfter && now.Sub(a.at) < GoneAfter {
+			starting[a.to]++
+		}
+	}
 	ids := make([]string, 0, len(c.members))
 	for id := range c.members {
 		ids = append(ids, id)

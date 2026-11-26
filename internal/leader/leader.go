@@ -157,6 +157,8 @@ type cluster struct {
 	deploUntil time.Time
 	// starting is the workloads a start order is out for, until it has an outcome: see told.
 	starting map[string]underWay
+	// failedOver is where a failover started each workload, and when: placed while its member stays silent (c49).
+	failedOver map[string]arrival
 	// gone is the members silent past GoneAfter that no longer count for a majority, and since when (ADR-0049).
 	gone map[string]time.Time
 	// succeed is an epoch this leader took without Deplo's word: it pre-votes before it probes (prevoted), until a
