@@ -67,6 +67,8 @@ type Member struct {
 	DiskTotal int64 `json:"diskTotal,omitempty"`
 	// Holds lists the workloads whose data it holds whole already: they take no more of its disk.
 	Holds []string `json:"holds,omitempty"`
+	// Starting is how many starts are under way on it, so a dead member's work spreads over the others (c48).
+	Starting int `json:"starting,omitempty"`
 }
 
 // DiskFits says whether w's data leaves a tenth of m's disk free. Data it holds whole takes nothing more, and the
@@ -112,7 +114,8 @@ func Needed(w Workload) int {
 	return n
 }
 
-// Place picks the member for w: eligible members, then database of its Environment, no sibling, most free after placing, fewest workloads.
+// Place picks the member for w: eligible members, then database of its Environment, no sibling, fewest starts under
+// way, most free after placing, fewest workloads.
 func Place(cluster string, w Workload, members []Member) Answer {
 	need := Needed(w)
 	refuse := func(r Reason) Answer {
@@ -168,6 +171,9 @@ func Place(cluster string, w Workload, members []Member) Answer {
 		}
 		if sa, sb := slices.Contains(a.Placed, w.ID), slices.Contains(b.Placed, w.ID); sa != sb {
 			return !sa
+		}
+		if a.Starting != b.Starting {
+			return a.Starting < b.Starting
 		}
 		if a.FreeMB != b.FreeMB {
 			return a.FreeMB > b.FreeMB
