@@ -107,8 +107,10 @@ type member struct {
 	answered time.Time
 	// inherited is when the leader before this one last heard it, as the heir that took over was told.
 	inherited time.Time
-	// sending is an order of a probe or renewal on its way to it, not answered yet.
+	// sending is an order of a probe or renewal on its way to it, not answered yet; passed counts the passes that
+	// went by it meanwhile, since its last renewal.
 	sending bool
+	passed  int
 }
 
 // lastHeard is when any leader of this cluster last heard the member, as far as this one knows; zero is never.
@@ -246,6 +248,8 @@ type Leader struct {
 	foMu sync.Mutex
 	// tickMu keeps a drain behind the renewals already on their way, so its longer lease is what a member hears last.
 	tickMu sync.Mutex
+	// lastRound is when the last round was asked for; the caller holds tickMu.
+	lastRound time.Time
 	// restored is the failover state read at start, handed to each cluster when its roster first arrives.
 	restored map[string]persisted
 	// pending is the moves a person asked for, made by the next failover pass.
