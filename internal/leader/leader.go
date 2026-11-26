@@ -261,6 +261,8 @@ type Leader struct {
 	said   map[string]string
 	// kick has Run renew now: a leader handed a cluster at a newer epoch probes at once, not at its next tick.
 	kick chan struct{}
+	// exchanges counts the passes begun: a renewal sent again belongs to its pass, and the next one ends it.
+	exchanges uint64
 	// ran is when this leader last noted it runs, and woke when it ran again after a gap past AsleepAfter: see awake.
 	wakeMu    sync.Mutex
 	ran, woke time.Time

@@ -12,31 +12,51 @@ import (
 )
 
 // Tick renews every member's lease once, then reports each member whose state changed.
-func (l *Leader) Tick(ctx context.Context) {
+func (l *Leader) Tick(ctx context.Context) { l.tick(ctx, time.Time{}) }
+
+// tick is Tick, sending a renewal that reached no member again until again: see renewAgain.
+func (l *Leader) tick(ctx context.Context, again time.Time) {
 	l.tickMu.Lock()
 	defer l.tickMu.Unlock()
 	// Told to stop: the drain's longer lease is the last order, and a dial does not look at a cancelled context.
 	if ctx.Err() != nil {
 		return
 	}
-	l.round(ctx)
+	l.round(ctx, again)
 	l.settle()
 }
 
 // round asks the members of every cluster this leader is not sure it leads, then sends its orders where a
 // quorum answered. The caller holds l.tickMu.
-func (l *Leader) round(ctx context.Context) {
+func (l *Leader) round(ctx context.Context, again time.Time) {
 	l.standDown(l.cfg.Now())
 	l.exchange(ctx, pass{prevote: true})
 	l.exchange(ctx, pass{probe: true})
-	l.exchange(ctx, pass{})
+	l.exchange(ctx, pass{again: again})
 }
 
 // pass is one exchange: a probe, a renewal that may announce an extension, or one that extends, to only some clusters.
+// With again set, a plain renewal that reached no member is sent again until then.
 type pass struct {
 	probe, announce, prevote bool
 	extend                   time.Duration
 	only                     map[string]bool
+	again                    time.Time
+}
+
+// orderFor is what a pass sends a member at now, with the cluster's line. The caller holds l.mu.
+func (c *cluster) orderFor(id string, m *member, p pass, line []string, now time.Time) lease.Order {
+	o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: p.probe, PreVote: p.prevote, From: c.roster.Self, Succeed: c.succeed}
+	if !p.probe && !p.prevote {
+		o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told(m.ID)), c.owesReturn(m.ID), int(p.extend/time.Second)
+		o.Line, o.Last, o.Heard = line, c.lineEnd(), c.heardAgo(now)
+		o.NoExtension = !p.announce && p.extend == 0 && c.noExtension(now)
+	}
+	if p.announce {
+		o.Announce = int(lease.AnnounceFor / time.Second)
+	}
+	o.Gone = c.goneFingerprints()
+	return o
 }
 
 // exchange sends one order to every member of the clusters that are due it: a probe where this leader is not
@@ -60,13 +80,14 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 	}
 	now := l.cfg.Now()
 	l.mu.Lock()
+	l.exchanges++
+	seq := l.exchanges
 	for id, c := range l.clusters {
 		if c.superseded || c.leads(now) == (probe || p.prevote) || p.only != nil && !p.only[id] || !c.due(p, now) {
 			continue
 		}
 		epochs[id] = c.epoch
 		line := c.line(now)
-		noExtension := !probe && !p.prevote && !p.announce && extend == 0 && c.noExtension(now)
 		for _, m := range c.members {
 			if p.prevote && !m.Succession {
 				continue
@@ -78,15 +99,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			if probe {
 				m.running = nil
 			}
-			o := lease.Order{Cluster: id, Member: m.ID, Epoch: c.epoch, Probe: probe, PreVote: p.prevote, From: c.roster.Self, Succeed: c.succeed}
-			if !probe && !p.prevote {
-				o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told(m.ID)), c.owesReturn(m.ID), int(extend/time.Second)
-				o.Line, o.Last, o.Heard, o.NoExtension = line, c.lineEnd(), c.heardAgo(now), noExtension
-			}
-			if p.announce {
-				o.Announce = int(lease.AnnounceFor / time.Second)
-			}
-			o.Gone = c.goneFingerprints()
+			o := c.orderFor(id, m, p, line, now)
 			if extend > 0 {
 				// Kept before the order leaves: a member that took it and whose answer was lost is extended all the same.
 				c.extended[m.ID] = now.Add(lease.FenceAfter + extend)
@@ -109,9 +122,8 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 	for _, j := range jobs {
 		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			// A gone member is renewed but does not vote until it is back and caught up.
-			ok := l.renew(ctx, j.cluster, j.id, j.fingerprint, j.m, j.order)
+			ok, reached := l.renew(ctx, j.cluster, j.id, j.fingerprint, j.m, j.order)
 			if !p.prevote {
 				l.mu.Lock()
 				j.m.sending = false
@@ -119,6 +131,10 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			}
 			if ok && j.votes {
 				answered <- j.cluster
+			}
+			wg.Done()
+			if !reached && !p.again.IsZero() {
+				l.renewAgain(ctx, j.cluster, j.m, j.order.Epoch, seq, p.again)
 			}
 		}()
 	}
@@ -277,23 +293,66 @@ func (l *Leader) keepWhereRunning(clusterID string, c *cluster) []func() {
 	return tells
 }
 
-// renew sends one order and says whether the member took it at this leader's epoch.
-func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m *member, o lease.Order) bool {
+// againAfter is how long a renewal that reached no member waits before each new try: an agent that restarts
+// misses one renewal, not a whole tick of its lease.
+var againAfter = []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 200 * time.Millisecond}
+
+// againWithin is how far into its tick a renewal is sent again, so it is over before the next tick's.
+const againWithin = 700 * time.Millisecond
+
+// renewAgain sends a member its renewal anew after each of againAfter, until one reaches it or until passes. A later
+// pass, another epoch or a leader no longer sure ends it: it never goes out beside or after a later pass's order.
+func (l *Leader) renewAgain(ctx context.Context, clusterID string, m *member, epoch, seq uint64, until time.Time) {
+	ctx, cancel := context.WithDeadline(ctx, until)
+	defer cancel()
+	for _, wait := range againAfter {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		l.mu.Lock()
+		c, now := l.clusters[clusterID], l.cfg.Now()
+		if ctx.Err() != nil || l.exchanges != seq || c == nil || c.epoch != epoch || c.members[m.ID] != m || !c.leads(now) {
+			l.mu.Unlock()
+			return
+		}
+		o := c.orderFor(clusterID, m, pass{}, c.line(now), now)
+		id, fingerprint := m.ID, m.Fingerprint
+		m.sending = true
+		l.mu.Unlock()
+		_, reached := l.renew(ctx, clusterID, id, fingerprint, m, o)
+		l.mu.Lock()
+		m.sending = false
+		l.mu.Unlock()
+		if reached {
+			return
+		}
+	}
+}
+
+// renew sends one order and says whether the member took it at this leader's epoch, and whether it answered at all.
+func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m *member, o lease.Order) (took, reached bool) {
+	end, bounded := ctx.Deadline()
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
 	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(sendTimeout))
+	dl := time.Now().Add(sendTimeout)
+	if bounded && end.Before(dl) {
+		dl = end
+	}
+	_ = c.SetDeadline(dl)
 	// Opened only for a member that answers, never on a probe: a keep carries its destination's credentials.
 	if !o.Probe {
 		o.Keep, o.Stores = l.keepsFor(clusterID, id), l.storesFor(clusterID, id)
 	}
 	r, err := lease.Send(c, o)
 	if err != nil {
-		return false
+		return false, false
 	}
 	if r.OK && r.Unsure != nil {
 		l.mu.Lock()
@@ -324,7 +383,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 			l.cfg.Logf("deplo-cluster: member %s holds epoch %d, newer than %d: stepping down", id, r.Epoch, o.Epoch)
 			l.log.Append("superseded", clusterID, map[string]uint64{"epoch": r.Epoch})
 		}
-		return false
+		return false, true
 	}
 	if r.OK {
 		l.mu.Lock()
@@ -333,7 +392,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 	}
 	// A probe renewed nothing, a pre-vote took nothing: the member's lease is as old as it was.
 	if o.PreVote {
-		return r.OK
+		return r.OK, true
 	}
 	if !r.OK || o.Probe {
 		if r.OK {
@@ -344,7 +403,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 				l.once("reports "+id, "deplo-cluster: %s's server agent does not say what it runs: the roster stands for its writers", id)
 			}
 		}
-		return r.OK
+		return r.OK, true
 	}
 	l.mu.Lock()
 	if now := l.cfg.Now(); m.upSince.IsZero() || now.Sub(m.lastAck) >= lease.NotRespondingAfter {
@@ -366,7 +425,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 	tell()
 	has()
 	later()
-	return true
+	return true, true
 }
 
 // settle moves every member to the state its silence earns and records the changes, in cluster and member order.
@@ -486,7 +545,7 @@ func (l *Leader) Run(ctx context.Context) {
 	t := time.NewTicker(lease.RenewEvery)
 	defer t.Stop()
 	for {
-		l.Tick(ctx)
+		l.tick(ctx, time.Now().Add(againWithin))
 		select {
 		case <-ctx.Done():
 			return
