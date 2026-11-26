@@ -88,6 +88,19 @@ func TestPrefersAMemberWithoutASibling(t *testing.T) {
 	}
 }
 
+// c48: fise and memos both went to the roomiest member and started side by side on its one core.
+func TestPrefersAMemberWithNoStartUnderWay(t *testing.T) {
+	a, b := member("a", 8000, 0), member("b", 1000, 5)
+	a.Starting = 1
+	if got := place(t, web(), a, b).Member; got != "b" {
+		t.Fatalf("got %s", got)
+	}
+	b.Starting = 2
+	if got := place(t, web(), a, b).Member; got != "a" {
+		t.Fatalf("fewest starts: got %s", got)
+	}
+}
+
 func TestThenMostFreeThenFewestWorkloads(t *testing.T) {
 	if got := place(t, web(), member("a", 1000, 0), member("b", 2000, 9)).Member; got != "b" {
 		t.Fatalf("free: %s", got)

@@ -88,6 +88,10 @@ func (c *cluster) memberFacts(now time.Time) []placement.Member {
 			placed[e.Member] = append(placed[e.Member], e.ID)
 		}
 	}
+	starting := map[string]int{}
+	for _, s := range c.starting {
+		starting[s.to]++
+	}
 	ids := make([]string, 0, len(c.members))
 	for id := range c.members {
 		ids = append(ids, id)
@@ -101,7 +105,7 @@ func (c *cluster) memberFacts(now time.Time) []placement.Member {
 		live := now.Sub(m.lastAck) < lease.NotRespondingAfter && !isGone
 		out = append(out, placement.Member{ID: id, Online: live, Leased: live, Emptying: m.Emptying, Arch: m.Arch,
 			Images: m.Images, FreeMB: m.FreeMB, Workloads: len(placed[id]), DatabaseEnvs: m.DatabaseEnvs, Placed: placed[id],
-			DiskFree: m.DiskFree, DiskTotal: m.DiskTotal, Holds: m.Holds})
+			DiskFree: m.DiskFree, DiskTotal: m.DiskTotal, Holds: m.Holds, Starting: starting[id]})
 	}
 	return out
 }

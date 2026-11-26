@@ -581,3 +581,33 @@ func TestASlowStartHoldsNoOtherApp(t *testing.T) {
 		t.Fatalf("slow on %q, quick on %q", placed(f, "prj_1"), placed(f, "prj_2"))
 	}
 }
+
+// c48: fise and memos both went to the roomiest member and started side by side on its one core (fise 21.7 s).
+func TestADeadMembersAppsStartOnMembersWithNoStartUnderWay(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": {Arch: "amd64", FreeMB: 8192}, "srv_c": roomy("amd64")})
+	for _, w := range [][2]string{{"prj_1", "fise"}, {"prj_2", "memos"}} {
+		f.putIn(t, "app", w[0], w[1], "", backup(""))
+		if err := f.l.Assign(leader.Assign{Cluster: "clu_1", Kind: "app", ID: w[0], Slug: w[1], SingleWriter: true, Members: []string{"srv_a"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each start lasts until both are ordered, so the second is placed while the first is under way.
+	var mu sync.Mutex
+	arrived, both := 0, make(chan struct{})
+	f.ms.onStart = func(string, lease.Order) {
+		mu.Lock()
+		if arrived++; arrived == 2 {
+			close(both)
+		}
+		mu.Unlock()
+		select {
+		case <-both:
+		case <-time.After(3 * time.Second):
+		}
+	}
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(90 * time.Second)
+	if a, b := placed(f, "prj_1"), placed(f, "prj_2"); a == b || a == "srv_a" || b == "srv_a" {
+		t.Fatalf("fise on %s, memos on %s", a, b)
+	}
+}
