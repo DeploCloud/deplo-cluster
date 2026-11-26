@@ -78,6 +78,9 @@ type members struct {
 	// from is the leader each member gave its epoch to; prevotes counts the pre-votes it answered yes.
 	from     map[string]string
 	prevotes map[string]int
+	// fails is how many more dials a member refuses, as an agent restarting does; tried is when each dial came.
+	fails map[string]int
+	tried map[string][]time.Time
 }
 
 // leaseEnd is when the lease a member holds runs out, as its agent counts it.
@@ -100,7 +103,8 @@ func laterOf(a, b time.Time) time.Time {
 
 func newMembers() *members {
 	return &members{epoch: map[string]uint64{}, running: map[string][]lease.Writer{}, old: map[string]bool{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, stoppedWithin: map[string]int{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{},
-		witness: map[string]bool{}, shortFence: map[string]bool{}, announced: map[string]time.Time{}, unannounced: map[string]time.Time{}, fence: map[string]int{}, from: map[string]string{}, prevotes: map[string]int{}}
+		witness: map[string]bool{}, shortFence: map[string]bool{}, announced: map[string]time.Time{}, unannounced: map[string]time.Time{}, fence: map[string]int{}, from: map[string]string{}, prevotes: map[string]int{},
+		fails: map[string]int{}, tried: map[string][]time.Time{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -110,8 +114,13 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.tried[to.Fingerprint] = append(m.tried[to.Fingerprint], time.Now())
 	if m.cut[to.Fingerprint] {
 		return nil, errors.New("no relay reaches that party")
+	}
+	if m.fails[to.Fingerprint] > 0 {
+		m.fails[to.Fingerprint]--
+		return nil, errors.New("that party's agent is restarting")
 	}
 	a, b := net.Pipe()
 	go func() {
