@@ -2,6 +2,9 @@ package leader_test
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,3 +125,27 @@ func TestAMemberBackAfterAHungRenewalIsRenewedAtOnce(t *testing.T) {
 	}
 }
 
+// c48: every member's renewals came 2 to 3 s apart for a while and the journal said nothing: a round that runs late
+// says where its time went, and so does a member that takes long to reach or to answer.
+func TestASlowRoundSaysWhereItsTimeWent(t *testing.T) {
+	ms := newMembers()
+	ms.slow = map[string]time.Duration{"fp-srv_b": time.Second, "fp-srv_c": time.Second}
+	var mu sync.Mutex
+	var said []string
+	logf := func(f string, a ...any) { mu.Lock(); said = append(said, fmt.Sprintf(f, a...)); mu.Unlock() }
+	l := newLeader(t, leader.Config{Dial: ms.dial, Now: time.Now, Logf: logf})
+	if err := l.SetRoster(roster(1, "srv_a", "srv_b", "srv_c")); err != nil {
+		t.Fatal(err)
+	}
+	l.Tick(context.Background())
+	l.Tick(context.Background())
+	mu.Lock()
+	defer mu.Unlock()
+	all := strings.Join(said, "\n")
+	if strings.Count(all, "deplo-cluster: a round took") != 1 || !strings.Contains(all, "renewals 1") {
+		t.Fatalf("two slow rounds said %q", all)
+	}
+	if !strings.Contains(all, "member srv_b took 0 ms to reach and 10") {
+		t.Fatalf("a slow member said %q", all)
+	}
+}
