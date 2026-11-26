@@ -195,7 +195,9 @@ func (l *Leader) saveRosters() {
 	}
 	out := map[string]Roster{}
 	for id, c := range l.clusters {
-		out[id] = c.roster
+		if !c.roster.Succeed {
+			out[id] = c.roster
+		}
 	}
 	l.keep("rosters.json", out)
 }

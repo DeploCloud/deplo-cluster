@@ -178,6 +178,10 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		}
 		if c.succeed {
 			c.succeed, c.roster.Succeed, c.ledAt = false, false, now
+			if c.epoch > l.epochs[id] {
+				l.epochs[id] = c.epoch
+				l.saveEpochs()
+			}
 			l.saveRosters()
 			tells = append(tells, l.succeeded(id, c.epoch))
 		}
@@ -455,6 +459,18 @@ func (c *cluster) regroup(mid string, now time.Time) string {
 
 // Run renews leases every lease.RenewEvery until ctx ends.
 func (l *Leader) Run(ctx context.Context) {
+	go func() {
+		a := time.NewTicker(awakeEvery)
+		defer a.Stop()
+		for {
+			l.Awake()
+			select {
+			case <-ctx.Done():
+				return
+			case <-a.C:
+			}
+		}
+	}()
 	go func() {
 		f := time.NewTicker(lease.RenewEvery)
 		defer f.Stop()

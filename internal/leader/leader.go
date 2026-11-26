@@ -261,6 +261,9 @@ type Leader struct {
 	said   map[string]string
 	// kick has Run renew now: a leader handed a cluster at a newer epoch probes at once, not at its next tick.
 	kick chan struct{}
+	// ran is when this leader last noted it runs, and woke when it ran again after a gap past AsleepAfter: see awake.
+	wakeMu    sync.Mutex
+	ran, woke time.Time
 }
 
 // once logs a line a pass every second would repeat only when it differs from the last one on that subject.
@@ -454,8 +457,9 @@ func (l *Leader) SetRoster(r Roster) error {
 		c.succeedUntil = now.Add(SucceedFor)
 	}
 	c.epoch = r.Epoch
-	l.epochs[r.Cluster] = r.Epoch
-	if changed {
+	// A try no quorum took yet promises nothing: its epoch is kept only once one does (c44).
+	if !r.Succeed && l.epochs[r.Cluster] != r.Epoch {
+		l.epochs[r.Cluster] = r.Epoch
 		l.saveEpochs()
 	}
 	c.roster = r

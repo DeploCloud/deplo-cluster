@@ -19,7 +19,13 @@ const (
 	LineLength = 2
 	// SucceedFor is how long one ask to lead keeps this leader trying without a quorum before it stands by again.
 	SucceedFor = 10 * time.Second
+	// AsleepAfter is a gap in this leader's own run past which it was frozen or asleep, not merely busy.
+	AsleepAfter = 2 * lease.RenewEvery
+	awakeEvery  = lease.RenewEvery / 4
 )
+
+// ErrAsleep refuses an ask to lead that stands on a silence this leader slept through.
+var ErrAsleep = errors.New("this server was frozen or asleep: it asks to lead only once it has heard its leader's silence itself, awake")
 
 // line is the heirs Deplo named that answered within NotRespondingAfter and still count, heir first. An heir this
 // leader stops hearing leaves the next renewal's line, and comes back at its end. The caller holds l.mu.
@@ -115,6 +121,11 @@ func (l *Leader) Succeed(a SucceedAsk) error {
 	if !ok {
 		return errors.New("this leader holds no standby roster for that cluster")
 	}
+	// The member's agent slept too: what it counts as its leader's silence is mostly its own (c44).
+	if woke := l.awake(now, false); !woke.IsZero() && now.Sub(woke) < lease.PreVoteFor+time.Duration(max(slices.Index(r.Heirs, r.Self), 0))*lease.SucceedStagger {
+		l.once("asleep "+a.Cluster, "deplo-cluster: cluster %s: this server ran again at %s after a freeze or a sleep: it asks to lead only once it has heard its leader's silence itself", a.Cluster, woke.UTC().Format(time.TimeOnly))
+		return ErrAsleep
+	}
 	r.Epoch, r.Succeed = max(a.Epoch, held), true
 	r.Placement, r.Standbys = nil, nil
 	for _, e := range a.Placement {
@@ -131,6 +142,23 @@ func (l *Leader) Succeed(a SucceedAsk) error {
 	l.markSince(a.Cluster, r.Epoch)
 	l.cfg.Logf("deplo-cluster: cluster %s: its leader is silent and this server is next in line: trying to lead at epoch %d", a.Cluster, r.Epoch)
 	return nil
+}
+
+// Awake notes that this leader runs now. Run calls it every quarter second, so a gap past AsleepAfter since the
+// last call is a freeze or a sleep it went through: see Succeed.
+func (l *Leader) Awake() { l.awake(l.cfg.Now(), true) }
+
+// awake says when this leader last ran again after a gap past AsleepAfter, zero if never; beat notes it runs now.
+func (l *Leader) awake(now time.Time, beat bool) time.Time {
+	l.wakeMu.Lock()
+	defer l.wakeMu.Unlock()
+	if !l.ran.IsZero() && now.Sub(l.ran) > AsleepAfter {
+		l.woke = now
+	}
+	if beat {
+		l.ran = now
+	}
+	return l.woke
 }
 
 // inherit carries on what the old leader knew: when it last heard each member, and which it no longer counted.
