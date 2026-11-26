@@ -256,7 +256,8 @@ func TestAFailoverSaysHowLongTheRestoreTook(t *testing.T) {
 
 // A start order renews the lease of the member it lands on: that member's fence counts from the start's end.
 func TestADatabaseWaitsOutTheLeaseAStartOrderGaveItsMember(t *testing.T) {
-	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64"), "srv_c": {Arch: "amd64", FreeMB: 2048}})
+	// srv_c has no room, so the database goes back to srv_a, which owes a return: orders.golden.json's example.
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": roomy("amd64"), "srv_c": {Arch: "amd64", FreeMB: 200}})
 	f.ms.stoppedWithin["fp-srv_b"] = 20
 	f.put(t, "prj_1", "web", "2026-01-01T00:00:00Z", true)
 	f.assign(t, "prj_1", "web", "srv_a")
