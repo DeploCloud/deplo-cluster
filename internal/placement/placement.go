@@ -67,7 +67,8 @@ type Member struct {
 	DiskTotal int64 `json:"diskTotal,omitempty"`
 	// Holds lists the workloads whose data it holds whole already: they take no more of its disk.
 	Holds []string `json:"holds,omitempty"`
-	// Starting is how many starts are under way on it, so a dead member's work spreads over the others (c48).
+	// Starting is the starts under way on it, and those a silent member's failover made there, so a dead member's
+	// work spreads over the others (c48, c49).
 	Starting int `json:"starting,omitempty"`
 }
 

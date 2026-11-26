@@ -639,3 +639,44 @@ func TestAFullLeaseThatLandedUnansweredHoldsItsDatabaseBack(t *testing.T) {
 		t.Fatalf("the database is on %s, %v after srv_a's last lease ran out", placed(f, "db_1"), waited)
 	}
 }
+
+// c49: the App without data left in the first pass and its start was over when the three with data were placed, so
+// the roomier survivor took three. The starts a dead member's failover made count with the ones under way.
+func TestADeadMembersAppsSpreadAcrossBothPasses(t *testing.T) {
+	f := startFO(t, map[string]leader.Member{"srv_a": roomy("amd64"), "srv_b": {Arch: "amd64", FreeMB: 8192}, "srv_c": roomy("amd64")})
+	f.put(t, "prj_big", "big", "2026-01-01T00:00:00Z", true)
+	f.assign(t, "prj_big", "big", "srv_a")
+	writers := []string{"prj_a", "prj_b", "prj_d"}
+	for _, id := range writers {
+		f.putIn(t, "app", id, id, "", backup(""))
+		if err := f.l.Assign(leader.Assign{Cluster: "clu_1", Kind: "app", ID: id, Slug: id, SingleWriter: true, Members: []string{"srv_a"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The three starts with data last until all are ordered, as they run side by side.
+	var mu sync.Mutex
+	arrived, all := 0, make(chan struct{})
+	f.ms.onStart = func(_ string, o lease.Order) {
+		if o.Start.Slug == "big" {
+			return
+		}
+		mu.Lock()
+		if arrived++; arrived == len(writers) {
+			close(all)
+		}
+		mu.Unlock()
+		select {
+		case <-all:
+		case <-time.After(3 * time.Second):
+		}
+	}
+	f.ms.cut["fp-srv_a"] = true
+	f.pass(90 * time.Second)
+	on := map[string][]string{}
+	for _, id := range append(writers, "prj_big") {
+		on[placed(f, id)] = append(on[placed(f, id)], id)
+	}
+	if len(on["srv_b"]) != 2 || len(on["srv_c"]) != 2 {
+		t.Fatalf("srv_b runs %v, srv_c %v", on["srv_b"], on["srv_c"])
+	}
+}

@@ -25,7 +25,7 @@ type persisted struct {
 }
 
 func (l *Leader) newCluster(id string) *cluster {
-	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, dropped: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}, left: map[string]map[string]time.Time{}, kept: map[string]map[string]time.Time{}, starting: map[string]underWay{}}
+	c := &cluster{members: map[string]*member{}, moved: map[string]bool{}, returning: map[string]bool{}, dropped: map[string]bool{}, waiting: map[string]*Waiting{}, auth: map[string]authority{}, extended: map[string]time.Time{}, left: map[string]map[string]time.Time{}, kept: map[string]map[string]time.Time{}, starting: map[string]underWay{}, failedOver: map[string]arrival{}}
 	if p, ok := l.restored[id]; ok {
 		if p.Extended != nil {
 			c.extended = p.Extended
