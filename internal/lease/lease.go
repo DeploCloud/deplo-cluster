@@ -317,7 +317,11 @@ var ErrStale = errors.New("a member holds a newer epoch")
 // Send writes the order and reads the member's reply on one stream.
 func Send(c io.ReadWriter, o Order) (Reply, error) {
 	if !o.Probe && !o.PreVote {
-		o.FenceSeconds, o.Announces = int(FenceFor/time.Second), true
+		o.Announces = true
+		// Zero is FenceFor; a leader may give a shorter lease, never a longer one.
+		if o.FenceSeconds == 0 {
+			o.FenceSeconds = int(FenceFor / time.Second)
+		}
 	}
 	raw, err := json.Marshal(o)
 	if err != nil {

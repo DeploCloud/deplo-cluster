@@ -6,6 +6,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -450,5 +451,78 @@ func TestTheHeirRenewsEveryMemberBeforeItsLeaseRunsOut(t *testing.T) {
 	// The second in line asks one stagger later, and still renews before the lease runs out.
 	if second := lease.PreVoteFor + lease.SucceedStagger + 2*lease.RenewEvery; second >= lease.FenceFor {
 		t.Fatalf("the second heir renews %v after the last renewal, past the %v lease", second, lease.FenceFor)
+	}
+}
+
+// quickStops is a roster whose agents keep to the fence they are given and stop their stacks all at once.
+func quickStops(r leader.Roster) leader.Roster {
+	for i := range r.Members {
+		r.Members[i].QuickStop = true
+	}
+	return r
+}
+
+// The leader on srv_a, cut off from the others past the removal time, gets srv_c back by a probe that lands just
+// before its heir's. srv_c then takes the heir's epoch and its refusal never reaches srv_a, so srv_a's leader, sure
+// from that probe, renews its own member for SureFor more. That lease ends before the heir counts it ended.
+func TestALeaderSureFromAProbeGivesNoLeaseItsHeirDoesNotCount(t *testing.T) {
+	f := startFO(t, abc())
+	newer(f)
+	f.putDB(t, "db_1", "db-main", backup(""))
+	if err := f.l.SetRoster(quickStops(withLine(snapshotRoster(f, 1), "srv_a"))); err != nil {
+		t.Fatal(err)
+	}
+	f.away = true
+	f.pass(3 * time.Second)
+	g := heir(t, f)
+	if err := g.l.Standby(quickStops(withLine(snapshotRoster(f, 1), "srv_b"))); err != nil {
+		t.Fatal(err)
+	}
+	g.sealDB(t, "db_1", "db-main", backup(""))
+	f.blind["srv_b"], f.blind["srv_c"], g.blind["srv_a"] = true, true, true
+	f.pass(lease.PreVoteFor + time.Second)
+	if leadsNow(f) {
+		t.Fatal("srv_a's leader leads with only its own member")
+	}
+
+	a := ask(f, 2)
+	var once sync.Once
+	f.ms.mu.Lock()
+	f.ms.onProbe = func(fp string, o lease.Order) {
+		if fp != "fp-srv_c" || o.From != "srv_a" {
+			return
+		}
+		once.Do(func() {
+			if err := g.l.Succeed(a); err != nil {
+				t.Error(err)
+			}
+			g.step()
+			f.ms.mu.Lock()
+			f.ms.fails["fp-srv_c"] = 1
+			f.ms.mu.Unlock()
+		})
+	}
+	f.ms.mu.Unlock()
+	delete(f.blind, "srv_c")
+	f.clk.Add(time.Second)
+	f.step()
+	f.blind["srv_c"] = true
+	took := f.clk.Now()
+	if !leadsNow(g) || !leadsNow(f) || f.ms.epoch["fp-srv_c"] != 2 {
+		t.Fatalf("no race: the heir leads %v, srv_a's leader leads %v, srv_c holds epoch %d", leadsNow(g), leadsNow(f), f.ms.epoch["fp-srv_c"])
+	}
+	for i := 0; i < 60 && placed(g, "db_1") == "srv_a"; i++ {
+		f.clk.Add(time.Second)
+		f.step()
+		g.step()
+	}
+	if placed(g, "db_1") == "srv_a" {
+		t.Fatal("the heir never moved the database")
+	}
+	// An agent that stops its stacks all at once takes up to 11 s once its lease ran out, and the heir 2 s to spare.
+	end := f.ms.leaseEnd("fp-srv_a")
+	// The heir's count is as it was: one renewal before its takeover, the 20 s lease and those 13 s.
+	if waited, after := f.clk.Now().Sub(end), f.clk.Now().Sub(took); waited < 13*time.Second || after != 33*time.Second {
+		t.Fatalf("the heir moved the database %v after its takeover, %v after srv_a's lease ran out", after, waited)
 	}
 }

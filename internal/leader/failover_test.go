@@ -611,3 +611,31 @@ func TestADeadMembersAppsStartOnMembersWithNoStartUnderWay(t *testing.T) {
 		t.Fatalf("fise on %s, memos on %s", a, b)
 	}
 }
+
+// A leader sure from its probe alone gives a short lease, and its member says when it has stopped after that one. The
+// next renewal, a full one, lands with no answer before the member is cut off: the database moves only once that
+// lease and the stop after it are over.
+func TestAFullLeaseThatLandedUnansweredHoldsItsDatabaseBack(t *testing.T) {
+	f := startFO(t, abc())
+	f.putDB(t, "db_1", "db-main", backup(""))
+	f.ms.shortFence["fp-srv_a"] = true
+	// An 11 s fence and 11 s to stop after it.
+	f.ms.stoppedWithin["fp-srv_a"] = 22
+	f.ms.cut["fp-srv_b"], f.ms.cut["fp-srv_c"] = true, true
+	f.pass(lease.PreVoteFor + time.Second)
+	f.ms.cut["fp-srv_b"], f.ms.cut["fp-srv_c"] = false, false
+	f.pass(time.Second)
+	if o := f.lastOrder("fp-srv_a"); o.FenceSeconds >= int(lease.FenceFor/time.Second) {
+		t.Fatalf("a leader sure from its probe alone gave a %d s lease", o.FenceSeconds)
+	}
+	f.ms.mute["fp-srv_a"] = true
+	f.step()
+	f.ms.mute["fp-srv_a"], f.ms.cut["fp-srv_a"] = false, true
+	end := f.ms.leaseEnd("fp-srv_a")
+	for i := 0; i < 60 && placed(f, "db_1") == "srv_a"; i++ {
+		f.pass(time.Second)
+	}
+	if waited := f.clk.Now().Sub(end); placed(f, "db_1") == "srv_a" || waited < 11*time.Second {
+		t.Fatalf("the database is on %s, %v after srv_a's last lease ran out", placed(f, "db_1"), waited)
+	}
+}

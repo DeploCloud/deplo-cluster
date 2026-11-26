@@ -40,6 +40,8 @@ type members struct {
 	// old are members whose agent is too old to say what it runs.
 	old map[string]bool
 	cut map[string]bool
+	// mute members take an order and never answer it, as one cut off right after.
+	mute map[string]bool
 	// hang holds a dial until the member is back or the dial gives up, as one does to an agent that is down.
 	hang   map[string]bool
 	orders map[string][]lease.Order
@@ -67,6 +69,8 @@ type members struct {
 	has map[string][]string
 	// onStart runs when a start order reached a member, before it answers: what happens during a long start.
 	onStart func(fp string, o lease.Order)
+	// onProbe runs once a member took a probe, before it answers.
+	onProbe func(fp string, o lease.Order)
 	now     func() time.Time
 	renewed map[string]time.Time
 	extra   map[string]int
@@ -106,7 +110,7 @@ func laterOf(a, b time.Time) time.Time {
 func newMembers() *members {
 	return &members{epoch: map[string]uint64{}, running: map[string][]lease.Writer{}, old: map[string]bool{}, cut: map[string]bool{}, orders: map[string][]lease.Order{}, starts: map[string][]lease.Order{}, refuse: map[string]bool{}, unrestored: map[string]bool{}, unpromoted: map[string]bool{}, startLeft: map[string]time.Duration{}, returned: map[string]*lease.Returned{}, renewed: map[string]time.Time{}, extra: map[string]int{}, has: map[string][]string{}, stoppedWithin: map[string]int{}, later: map[string]*lease.Later{}, probes: map[string][]lease.Order{},
 		witness: map[string]bool{}, shortFence: map[string]bool{}, announced: map[string]time.Time{}, unannounced: map[string]time.Time{}, fence: map[string]int{}, from: map[string]string{}, prevotes: map[string]int{},
-		fails: map[string]int{}, tried: map[string][]time.Time{}, hang: map[string]bool{}}
+		fails: map[string]int{}, tried: map[string][]time.Time{}, hang: map[string]bool{}, mute: map[string]bool{}}
 }
 
 func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
@@ -199,7 +203,8 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 				}
 			}
 		}
-		if fp := to.Fingerprint; r.OK && m.witness[fp] && m.now != nil {
+		// A pre-vote takes nothing, so an agent says nothing of extensions to it.
+		if fp := to.Fingerprint; r.OK && !o.PreVote && m.witness[fp] && m.now != nil {
 			now := m.now()
 			if !o.Probe && !o.Announces {
 				m.unannounced[fp] = laterOf(m.unannounced[fp], now.Add(lease.FenceAfter+lease.ExtendFor))
@@ -213,8 +218,14 @@ func (m *members) dial(ctx context.Context, to wire.Party) (net.Conn, error) {
 			u := max(int(laterOf(m.announced[fp], m.unannounced[fp]).Sub(now).Seconds()+0.999), 0)
 			r.Unsure = &u
 		}
-		takes, hook := m.restoreTakes, m.onStart
+		takes, hook, probed, mute := m.restoreTakes, m.onStart, m.onProbe, m.mute[to.Fingerprint]
 		m.mu.Unlock()
+		if mute {
+			return
+		}
+		if o.Probe && r.OK && probed != nil {
+			probed(to.Fingerprint, o)
+		}
 		if o.Start != nil && hook != nil {
 			hook(to.Fingerprint, o)
 		}

@@ -84,7 +84,11 @@ func TestAKeepAndAStoreAreTheAgentsWireShape(t *testing.T) {
 
 // deplo-agent reads fenceSeconds and stoppedWithin by these names; a probe renews nothing, so it says no fence.
 func TestARenewalSaysHowLongItsLeaseLivesAndAProbeDoesNot(t *testing.T) {
-	for _, probe := range []bool{false, true} {
+	// Zero is FenceFor; a leader's shorter lease goes out as it is.
+	for _, c := range []struct {
+		probe       bool
+		fence, want int
+	}{{false, 0, int(lease.FenceFor / time.Second)}, {true, 0, 0}, {false, 9, 9}} {
 		a, b := net.Pipe()
 		got := make(chan string, 1)
 		go func() {
@@ -92,14 +96,14 @@ func TestARenewalSaysHowLongItsLeaseLivesAndAProbeDoesNot(t *testing.T) {
 			got <- line
 			b.Write([]byte(`{"ok":true,"stoppedWithin":21}` + "\n"))
 		}()
-		r, err := lease.Send(a, lease.Order{Cluster: "clu_1", Epoch: 3, Probe: probe})
+		r, err := lease.Send(a, lease.Order{Cluster: "clu_1", Epoch: 3, Probe: c.probe, FenceSeconds: c.fence})
 		a.Close()
 		b.Close()
 		if err != nil || r.StoppedWithin != 21 {
 			t.Fatalf("reply %+v (%v)", r, err)
 		}
-		if line := <-got; strings.Contains(line, fmt.Sprintf(`"fenceSeconds":%d`, int(lease.FenceFor/time.Second))) == probe {
-			t.Fatalf("probe %v sent %s", probe, line)
+		if line := <-got; strings.Contains(line, "fenceSeconds") != (c.want > 0) || c.want > 0 && !strings.Contains(line, fmt.Sprintf(`"fenceSeconds":%d,`, c.want)) {
+			t.Fatalf("%+v sent %s", c, line)
 		}
 	}
 }
