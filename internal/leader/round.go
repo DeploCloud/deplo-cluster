@@ -331,12 +331,18 @@ func (l *Leader) renewAgain(ctx context.Context, clusterID string, m *member, ep
 	}
 }
 
+// dialWithin ends a dial that reaches nothing before the tick two after its own, which would skip the member while it
+// lasts: a renewal sent while a member's agent was down left it 4 s without one (c48).
+const dialWithin = 2*lease.RenewEvery - 100*time.Millisecond
+
 // renew sends one order and says whether the member took it at this leader's epoch, and whether it answered at all.
 func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m *member, o lease.Order) (took, reached bool) {
 	end, bounded := ctx.Deadline()
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
-	c, err := l.cfg.Dial(ctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
+	dctx, dcancel := context.WithTimeout(ctx, dialWithin)
+	c, err := l.cfg.Dial(dctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
+	dcancel()
 	if err != nil {
 		return false, false
 	}

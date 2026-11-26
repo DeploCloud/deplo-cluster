@@ -81,3 +81,44 @@ func TestAMissedRenewalIsSentAgainWithinItsTick(t *testing.T) {
 		}
 	}
 }
+
+// c48: a renewal sent while a member's agent was down hung for its whole 2 s, the tick at its end skipped that
+// member as still taking it, and the agent, back meanwhile, was renewed a tick late: 4 s without a renewal.
+func TestAMemberBackAfterAHungRenewalIsRenewedAtOnce(t *testing.T) {
+	ms := newMembers()
+	ms.now = time.Now
+	l := newLeader(t, leader.Config{Dial: ms.dial, Now: time.Now})
+	if err := l.SetRoster(roster(1, "srv_a", "srv_b", "srv_c")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); l.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	renewedAfter := func(at time.Time, within time.Duration) time.Time {
+		t.Helper()
+		for end := time.Now().Add(within); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+			if got := ms.renewedAt("fp-srv_c"); got.After(at) {
+				return got
+			}
+		}
+		t.Fatalf("srv_c was not renewed within %s", within)
+		return time.Time{}
+	}
+
+	last := renewedAfter(renewedAfter(time.Time{}, 3*time.Second), 3*time.Second)
+	time.Sleep(50 * time.Millisecond)
+	ms.mu.Lock()
+	ms.hang["fp-srv_c"] = true
+	ms.mu.Unlock()
+	// Back 0.3 s after the tick at the end of the first hung try: the next tick's renewal is waiting for it.
+	time.Sleep(last.Add(3300 * time.Millisecond).Sub(time.Now()))
+	ms.mu.Lock()
+	ms.hang["fp-srv_c"] = false
+	ms.mu.Unlock()
+	back := time.Now()
+	if late := renewedAfter(last, 3*time.Second).Sub(back); late > 300*time.Millisecond {
+		t.Fatalf("srv_c was renewed %s after it was back", late)
+	}
+}
+
