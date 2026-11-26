@@ -142,10 +142,47 @@ func TestASlowRoundSaysWhereItsTimeWent(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	all := strings.Join(said, "\n")
-	if strings.Count(all, "deplo-cluster: a round took") != 1 || !strings.Contains(all, "renewals 1") {
+	// c50: a slow round is said every time from 1.2 s; these took 2.0 s, then 1.0 s two seconds after the first.
+	if strings.Count(all, "deplo-cluster: a round took") != 2 || !strings.Contains(all, "renewals 1") {
 		t.Fatalf("two slow rounds said %q", all)
 	}
 	if !strings.Contains(all, "member srv_b took 0 ms to reach and 10") {
 		t.Fatalf("a slow member said %q", all)
+	}
+}
+
+// c50: every member's renewals came 2.0 s apart now and then, with no slow round in the leader's journal. A round
+// that begins late says so, and a member renewed late says whether its order left late, waited, or was slow.
+func TestALateRoundAndALateRenewalSayWhy(t *testing.T) {
+	ms := newMembers()
+	var mu sync.Mutex
+	var said []string
+	logf := func(f string, a ...any) { mu.Lock(); said = append(said, fmt.Sprintf(f, a...)); mu.Unlock() }
+	l := newLeader(t, leader.Config{Dial: ms.dial, Now: time.Now, Logf: logf})
+	if err := l.SetRoster(roster(1, "srv_a", "srv_b", "srv_c")); err != nil {
+		t.Fatal(err)
+	}
+	l.Tick(context.Background())
+	ms.mu.Lock()
+	ms.slow = map[string]time.Duration{"fp-srv_c": 1500 * time.Millisecond}
+	ms.mu.Unlock()
+	l.Tick(context.Background())
+	l.Tick(context.Background())
+	time.Sleep(1600 * time.Millisecond)
+	ms.mu.Lock()
+	ms.slow = nil
+	ms.mu.Unlock()
+	l.Tick(context.Background())
+	mu.Lock()
+	defer mu.Unlock()
+	all := strings.Join(said, "\n")
+	if !strings.Contains(all, "ms after the one before") || !strings.Contains(all, "a round took") {
+		t.Fatalf("a round 1.6 s after the one before said %q", all)
+	}
+	if !strings.Contains(all, "member srv_c renewed 15") || !strings.Contains(all, "1 passes went by it while it took an order") {
+		t.Fatalf("srv_c, renewed 1.5 s late, said %q", all)
+	}
+	if !strings.Contains(all, "member srv_a renewed 16") || !strings.Contains(all, "this one left 16") {
+		t.Fatalf("srv_a, its renewal sent 1.6 s late, said %q", all)
 	}
 }

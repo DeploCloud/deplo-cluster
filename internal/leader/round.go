@@ -2,6 +2,7 @@ package leader
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sort"
 	"sync"
@@ -37,16 +38,29 @@ func (l *Leader) round(ctx context.Context, again, asked time.Time) {
 	l.exchange(ctx, pass{probe: true})
 	probed := time.Now()
 	l.exchange(ctx, pass{again: again})
-	// c48: every member's renewals 2 to 3 s apart, and nothing in the journal said why.
-	if took := time.Since(asked); took >= slowRound {
-		l.rarely("round", "deplo-cluster: a round took %d ms: %d waiting for its turn, pre-vote %d, probe %d, renewals %d",
-			took.Milliseconds(), began.Sub(asked).Milliseconds(), voted.Sub(began).Milliseconds(),
+	// c48: every member's renewals 2 to 3 s apart, and nothing in the journal said why; c50: 2.0 s, still nothing.
+	took, since := time.Since(asked), asked.Sub(l.lastRound)
+	if l.lastRound.IsZero() {
+		since = 0
+	}
+	l.lastRound = asked
+	if took >= slowRound || since >= lateGap {
+		say := l.rarely
+		if took >= lateGap || since >= lateGap {
+			say = func(_, format string, args ...any) { l.cfg.Logf(format, args...) }
+		}
+		say("round", "deplo-cluster: a round took %d ms, %d ms after the one before: %d waiting for its turn, pre-vote %d, probe %d, renewals %d",
+			took.Milliseconds(), since.Milliseconds(), began.Sub(asked).Milliseconds(), voted.Sub(began).Milliseconds(),
 			probed.Sub(voted).Milliseconds(), time.Since(probed).Milliseconds())
 	}
 }
 
-// slowRound is a round that leaves the next renewal at risk of coming a whole tick late.
-const slowRound = 900 * time.Millisecond
+// slowRound is a round that leaves the next renewal at risk of coming a whole tick late; one past lateGap, or one
+// that began lateGap after the one before, is said every time.
+const (
+	slowRound = 900 * time.Millisecond
+	lateGap   = 1200 * time.Millisecond
+)
 
 // pass is one exchange: a probe, a renewal that may announce an extension, or one that extends, to only some clusters.
 // With again set, a plain renewal that reached no member is sent again until then.
@@ -120,6 +134,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 			}
 			// A member still taking the last order gets the next one once it answered, never two at a time.
 			if !p.prevote && m.sending {
+				m.passed++
 				continue
 			}
 			if probe {
@@ -370,7 +385,7 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 	end, bounded := ctx.Deadline()
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
-	began := time.Now()
+	began, sentAt := time.Now(), l.cfg.Now()
 	dctx, dcancel := context.WithTimeout(ctx, dialWithin)
 	c, err := l.cfg.Dial(dctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
 	dcancel()
@@ -457,6 +472,12 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 	if within > 0 && o.FenceSeconds > 0 {
 		within += lease.FenceFor - time.Duration(o.FenceSeconds)*time.Second
 	}
+	late := ""
+	if prev, now := m.lastAck, l.cfg.Now(); !prev.IsZero() && now.Sub(prev) >= lateGap {
+		late = fmt.Sprintf("deplo-cluster: member %s renewed %d ms after its last: this one left %d ms after it, %d passes went by it while it took an order, it reached it in %d ms and answered in %d",
+			id, now.Sub(prev).Milliseconds(), sentAt.Sub(prev).Milliseconds(), m.passed, dialed.Sub(began).Milliseconds(), time.Since(dialed).Milliseconds())
+	}
+	m.passed = 0
 	m.lastAck, m.stoppedWithin, m.heard = l.cfg.Now(), within, true
 	// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
 	if o.ExtendSeconds == 0 {
@@ -470,6 +491,9 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 	has := l.stillHas(clusterID, id, r.Unplaced)
 	later := l.heardLater(clusterID, id, r.Later)
 	l.mu.Unlock()
+	if late != "" {
+		l.cfg.Logf("%s", late)
+	}
 	tell()
 	has()
 	later()
