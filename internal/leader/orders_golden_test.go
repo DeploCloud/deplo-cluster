@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/DeploCloud/deplo-cluster/internal/lease"
 )
@@ -62,6 +63,9 @@ func orderKind(o lease.Order) string {
 // recordSent keeps one order of each kind, with what the agent's checks do not read made plain.
 func recordSent(o lease.Order) {
 	o.Cluster, o.Member, o.Epoch, o.Placement, o.Heard, o.Gone, o.Line, o.Last, o.Keep, o.Stores = "clu_1", "srv_a", 0, nil, nil, nil, nil, "", nil, nil
+	if o.FenceSeconds > 0 {
+		o.FenceSeconds = int(lease.FenceFor / time.Second)
+	}
 	if o.From != "" {
 		o.From = "leader"
 	}

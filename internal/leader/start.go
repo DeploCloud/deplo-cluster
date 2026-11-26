@@ -48,7 +48,7 @@ func (l *Leader) sendStart(ctx context.Context, fp string, o lease.Order) error 
 	// member's name server would count a gone one again until the next renewal (seen on cluster eu).
 	l.mu.Lock()
 	if c := l.clusters[o.Cluster]; c != nil {
-		o.Gone = c.goneFingerprints()
+		o.Gone, o.FenceSeconds = c.goneFingerprints(), c.fence(l.cfg.Now())
 	}
 	l.mu.Unlock()
 	// A start renews the member's lease too, when it lands: until it is over, its fence counts from its end.

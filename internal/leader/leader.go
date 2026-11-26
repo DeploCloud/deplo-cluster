@@ -149,9 +149,10 @@ type cluster struct {
 	extended map[string]time.Time
 	// roster is the last one pushed, kept so a restarted leader serves its cluster before Deplo is back.
 	roster Roster
-	// sure is when the last round began that a quorum answered at this epoch, and heard how many did.
-	sure  time.Time
-	heard int
+	// sure is when the last round began that a quorum answered at this epoch, and heard how many did; locked is
+	// when the last renewal began that a quorum took, which each of them refuses an heir for PreVoteFor after.
+	sure, locked time.Time
+	heard        int
 	// deploUntil is how long the control plane's last word for this epoch holds here.
 	deploUntil time.Time
 	// starting is the workloads a start order is out for, until it has an outcome: see told.
@@ -438,7 +439,7 @@ func (l *Leader) SetRoster(r Roster) error {
 	again := c.epoch != 0 && r.Epoch > c.epoch
 	if again {
 		c.auth, c.waiting, c.moved = map[string]authority{}, map[string]*Waiting{}, map[string]bool{}
-		c.sure, c.deploUntil = time.Time{}, time.Time{}
+		c.sure, c.locked, c.deploUntil = time.Time{}, time.Time{}, time.Time{}
 		c.vouched, c.unsure = false, time.Time{}
 	}
 	now := l.cfg.Now()

@@ -64,12 +64,25 @@ func (c *cluster) orderFor(id string, m *member, p pass, line []string, now time
 		o.Placement, o.Return, o.ExtendSeconds = c.orderPlacement(c.told(m.ID)), c.owesReturn(m.ID), int(p.extend/time.Second)
 		o.Line, o.Last, o.Heard = line, c.lineEnd(), c.heardAgo(now)
 		o.NoExtension = !p.announce && p.extend == 0 && c.noExtension(now)
+		o.FenceSeconds = c.fence(now)
 	}
 	if p.announce {
 		o.Announce = int(lease.AnnounceFor / time.Second)
 	}
 	o.Gone = c.goneFingerprints()
 	return o
+}
+
+// reach is the longest an order takes to land: its dial, then its stream's deadline.
+const reach = dialWithin + sendTimeout
+
+// fence is how many seconds a lease given now lives: it ends before an heir counts it ended, one renewal before the
+// earliest takeover this leader's last quorum allows. That is PreVoteFor after a renewal, but at once after a probe,
+// which keeps no member from taking a newer epoch. The heir's probe and this order each take up to reach to land.
+func (c *cluster) fence(now time.Time) int {
+	heir := latest(c.locked.Add(lease.PreVoteFor), c.sure).Add(-reach)
+	left := heir.Add(lease.FenceFor - lease.RenewEvery).Sub(now.Add(reach))
+	return int(max(min(left, lease.FenceFor), time.Second) / time.Second)
 }
 
 // exchange sends one order to every member of the clusters that are due it: a probe where this leader is not
@@ -203,6 +216,7 @@ func (l *Leader) exchange(ctx context.Context, p pass) map[string]bool {
 		}
 		c.sure, c.heard = now, n
 		if !probe {
+			c.locked = now
 			continue
 		}
 		if c.succeed {
@@ -438,7 +452,12 @@ func (l *Leader) renew(ctx context.Context, clusterID, id, fingerprint string, m
 	if now := l.cfg.Now(); m.upSince.IsZero() || now.Sub(m.lastAck) >= lease.NotRespondingAfter {
 		m.upSince = now
 	}
-	m.lastAck, m.stoppedWithin, m.heard = l.cfg.Now(), time.Duration(r.StoppedWithin)*time.Second, true
+	// The member's word counted for the longest lease this leader gives: a later order may land with no answer.
+	within := time.Duration(r.StoppedWithin) * time.Second
+	if within > 0 && o.FenceSeconds > 0 {
+		within += lease.FenceFor - time.Duration(o.FenceSeconds)*time.Second
+	}
+	m.lastAck, m.stoppedWithin, m.heard = l.cfg.Now(), within, true
 	// A plain renewal starts the member's lease over at 60 s: what an earlier extension bought is gone.
 	if o.ExtendSeconds == 0 {
 		m.other = time.Time{}
